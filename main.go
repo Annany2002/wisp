@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"log"
 	"net"
 	"strings"
+	"time"
 )
 
 // Request holds the parsed data from an HTTP request line.
@@ -71,7 +73,27 @@ func handleConnection(conn net.Conn) {
 	}
 
 	log.Printf("Request received: %+v", req)
-	// Future header parsing and response logic will go here.
+
+	// response body starts here
+	body := "Hello from Wisp!!!"
+
+	response := fmt.Sprintf(
+		"HTTP/1.1 200 OK\r\n"+
+			"Content-Type: text/plain\r\n"+
+			"Content-Length: %d\r\n"+
+			"Date: %s\r\n"+
+			"\r\n"+
+			"%s",
+		len(body),
+		time.Now().UTC().Format(time.RFC1123),
+		body,
+	)
+
+	// Send the response back to the client.
+	_, err = conn.Write([]byte(response))
+	if err != nil {
+		log.Printf("Failed to write response: %v", err)
+	}
 }
 
 func main() {
