@@ -12,6 +12,7 @@ type Request struct {
 	Method  string
 	URI     string
 	Version string
+	Headers map[string]string
 }
 
 // handleConnection manages a single client connection.
@@ -40,6 +41,33 @@ func handleConnection(conn net.Conn) {
 		Method:  parts[0],
 		URI:     parts[1],
 		Version: parts[2],
+		Headers: make(map[string]string),
+	}
+
+	// Loop to read and parse headers until a blank line is found
+	for {
+		headerLine, err := reader.ReadString('\n')
+		if err != nil {
+			log.Printf("Failed to read header: %v", err)
+			return
+		}
+
+		// A blank line (\r\n) signifies line break
+		if headerLine == "\r\n" {
+			break
+		}
+
+		// Split the header line into key and value
+		headerParts := strings.SplitN(headerLine, ":", 2)
+		if len(headerParts) != 2 {
+			log.Printf("Malformed header: %s", headerLine)
+			continue
+		}
+
+		// Extract the key and value
+		key := strings.TrimSpace(headerParts[0])
+		value := strings.TrimSpace(headerParts[1])
+		req.Headers[key] = value
 	}
 
 	log.Printf("Request received: %+v", req)
