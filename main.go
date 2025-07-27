@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"strings"
 )
 
@@ -74,23 +75,22 @@ func handleConnection(conn net.Conn, config *ServerConfig) {
 	// Use the router to find the correct location for this request.
 	location := RouteRequest(&req, config)
 
-	// for now, just log the outcome
+	// Dispatch to the appropriate handler.
 	if location == nil {
-		log.Printf("No location found for URI: %s", req.URI)
-	} else {
-		log.Printf("Request for %s matched location %s", req.URI, location.Path)
+		sendErrorResponse(conn, http.StatusNotFound)
+		return
 	}
 
-	log.Printf("Request received: %+v", req)
-
-	// The response is still hardcoded for now.
-	body := "Hello from Wisp!"
-	response := fmt.Sprintf(
-		"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s",
-		len(body),
-		body,
-	)
-	conn.Write([]byte(response))
+	if location.Root != "" {
+		ServeStaticFile(conn, &req, location)
+	} else if location.ProxyPass != "" {
+		// Future proxy logic will go here.
+		log.Printf("Proxy pass not yet implemented for %s", location.Path)
+		sendErrorResponse(conn, http.StatusNotImplemented)
+	} else {
+		log.Printf("Location %s is not configured for any action", location.Path)
+		sendErrorResponse(conn, http.StatusInternalServerError)
+	}
 }
 
 func main() {
