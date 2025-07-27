@@ -1,0 +1,24 @@
+# Go build output
+main
+*.out
+*.exe
+
+# Editor/IDE config
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dev tools
+.air.toml
+
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md

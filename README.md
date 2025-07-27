@@ -37,9 +37,9 @@ server {
 }
 ```
 
-## Getting Started
+## How to run
 
-### Running with Air (Hot Reload)
+### Using Air (Hot Reload)
 
 [Air](https://github.com/air-verse/air) provides live reloading for Go applications. This project includes a pre-configured `.air.toml` file for convenience.
 
@@ -53,7 +53,21 @@ server {
     ```
     This will automatically rebuild and restart the server on code changes. The configuration in `.air.toml` ensures the correct entrypoint is used..
 
-### Using go binary
+### Using docker
+
+1. Build the image
+   ```sh
+   docker build -t wisp:tag-name .
+   ```
+2. Run the image
+
+   ```sh
+   docker run --name container-name -p 8080:8080 wisp:tag-name
+   ```
+
+   The server will start on port **8080**.
+
+### Standard Execution (Local)
 
 1.  **Clone the repository:**
 
