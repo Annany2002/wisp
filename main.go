@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 )
 
 // Request holds the parsed data from an HTTP request line.
@@ -17,7 +18,7 @@ type Request struct {
 }
 
 // handleConnection manages a single client connection.
-func handleConnection(conn net.Conn, config *ServerConfig) {
+func handleConnection(conn net.Conn) {
 	defer conn.Close()
 	log.Printf("Handling connection from %s", conn.RemoteAddr())
 
@@ -71,26 +72,28 @@ func handleConnection(conn net.Conn, config *ServerConfig) {
 		req.Headers[key] = value
 	}
 
-	// Use the router to find the correct location for this request.
-	location := RouteRequest(&req, config)
-
-	// for now, just log the outcome
-	if location == nil {
-		log.Printf("No location found for URI: %s", req.URI)
-	} else {
-		log.Printf("Request for %s matched location %s", req.URI, location.Path)
-	}
-
 	log.Printf("Request received: %+v", req)
 
-	// The response is still hardcoded for now.
-	body := "Hello from Wisp!"
+	// response body starts here
+	body := "Hello from Wisp!!!"
+
 	response := fmt.Sprintf(
-		"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s",
+		"HTTP/1.1 200 OK\r\n"+
+			"Content-Type: text/plain\r\n"+
+			"Content-Length: %d\r\n"+
+			"Date: %s\r\n"+
+			"\r\n"+
+			"%s",
 		len(body),
+		time.Now().UTC().Format(time.RFC1123),
 		body,
 	)
-	conn.Write([]byte(response))
+
+	// Send the response back to the client.
+	_, err = conn.Write([]byte(response))
+	if err != nil {
+		log.Printf("Failed to write response: %v", err)
+	}
 }
 
 func main() {
@@ -116,6 +119,6 @@ func main() {
 			log.Printf("Failed to accept connection: %v", err)
 			continue
 		}
-		go handleConnection(conn, config)
+		go handleConnection(conn)
 	}
 }
