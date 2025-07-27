@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -37,7 +38,7 @@ func sendErrorResponse(conn net.Conn, statusCode int) {
 }
 
 // serveStaticFile serves a file from the filesystem.
-func ServeStaticFile(conn net.Conn, req *Request, loc *LocationConfig) {
+func serveStaticFile(conn net.Conn, req *Request, loc *LocationConfig) {
 	// Construct the full file path safely.
 	path := filepath.Join(loc.Root, req.URI)
 
@@ -83,4 +84,56 @@ func ServeStaticFile(conn net.Conn, req *Request, loc *LocationConfig) {
 	if err != nil {
 		log.Printf("Failed to write file content: %v", err)
 	}
+}
+
+// serveReverseProxy forwards a request to a backend service.
+func serveReverseProxy(conn net.Conn, req *Request, loc *LocationConfig) {
+	backendURL, err := url.Parse(loc.ProxyPass)
+	if err != nil {
+		log.Printf("Malformed proxy_pass URL: %s", loc.ProxyPass)
+		sendErrorResponse(conn, http.StatusInternalServerError)
+		return
+	}
+
+	// Create a new request to the backend.
+	// The backend receives the request URI from the original request.
+	backendReq, err := http.NewRequest(req.Method, backendURL.String()+req.URI, nil)
+	if err != nil {
+		log.Printf("Failed to create backend request: %v", err)
+		sendErrorResponse(conn, http.StatusInternalServerError)
+		return
+	}
+
+	// Copy headers from the original request to the new backend request.
+	for key, value := range req.Headers {
+		backendReq.Header.Set(key, value)
+	}
+	// Set the Host header to the backend's host.
+	backendReq.Host = backendURL.Host
+
+	// Send the request to the backend.
+	backendResp, err := http.DefaultClient.Do(backendReq)
+	if err != nil {
+		log.Printf("Failed to get response from backend: %v", err)
+		sendErrorResponse(conn, http.StatusBadGateway)
+		return
+	}
+	defer backendResp.Body.Close()
+
+	// --- Write the backend's response back to the original client ---
+	// Write the status line from the backend response.
+	conn.Write([]byte(fmt.Sprintf("%s %s\r\n", backendResp.Proto, backendResp.Status)))
+
+	// Write headers from the backend response.
+	for key, values := range backendResp.Header {
+		for _, value := range values {
+			conn.Write([]byte(fmt.Sprintf("%s: %s\r\n", key, value)))
+		}
+	}
+
+	// Write the blank line separator.
+	conn.Write([]byte("\r\n"))
+
+	// Stream the backend's response body to the client.
+	io.Copy(conn, backendResp.Body)
 }

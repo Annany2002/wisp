@@ -82,11 +82,9 @@ func handleConnection(conn net.Conn, config *ServerConfig) {
 	}
 
 	if location.Root != "" {
-		ServeStaticFile(conn, &req, location)
+		serveStaticFile(conn, &req, location)
 	} else if location.ProxyPass != "" {
-		// Future proxy logic will go here.
-		log.Printf("Proxy pass not yet implemented for %s", location.Path)
-		sendErrorResponse(conn, http.StatusNotImplemented)
+		serveReverseProxy(conn, &req, location)
 	} else {
 		log.Printf("Location %s is not configured for any action", location.Path)
 		sendErrorResponse(conn, http.StatusInternalServerError)
