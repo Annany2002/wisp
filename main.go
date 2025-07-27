@@ -97,7 +97,13 @@ func handleConnection(conn net.Conn) {
 }
 
 func main() {
-	const address = ":8080"
+	config, err := ParseConfig("wisp.conf")
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	// using the port from the config file
+	address := fmt.Sprintf(":%d", config.Listen)
 
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
