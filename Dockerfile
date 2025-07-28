@@ -16,7 +16,6 @@ FROM alpine:latest
 WORKDIR /root/
 
 COPY --from=builder /app/wisp .
-COPY --from=builder /app/wisp.conf .
 
 EXPOSE 8080
 

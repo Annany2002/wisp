@@ -53,6 +53,16 @@ server {
     ```
     This will automatically rebuild and restart the server on code changes. The configuration in `.air.toml` ensures the correct entrypoint is used..
 
+### Using docker-compose
+
+1. To start the application using Docker Compose:
+
+   ```sh
+   docker compose up
+   ```
+
+   This will start the wisp-server on port **8080**.
+
 ### Using docker
 
 1. Build the image
@@ -62,7 +72,7 @@ server {
 2. Run the image
 
    ```sh
-   docker run --name container-name -p 8080:8080 wisp:tag-name
+   docker run -v $(pwd)/wisp.conf:/root/wisp.conf -p 8080:8080 wisp
    ```
 
    The server will start on port **8080**.
