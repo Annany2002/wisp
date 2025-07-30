@@ -8,7 +8,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o wisp .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o wisp cmd/wisp/main.go
 
 # Stage 2: Lightweight runtime
 FROM alpine:latest

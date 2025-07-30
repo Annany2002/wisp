@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"bufio"
@@ -23,7 +23,7 @@ type ServerConfig struct {
 }
 
 // ParseConfig reads and parses a Wisp configuration file.
-func ParseConfig(filePath string) (*ServerConfig, error) {
+func Parse(filePath string) (*ServerConfig, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("could not open config file: %w", err)

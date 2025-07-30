@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"fmt"
@@ -10,11 +10,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/Annany2002/wisp/internal/config"
 )
 
-// sendErrorResponse writes a simple HTTP error response to the client.
-func sendErrorResponse(conn net.Conn, statusCode int) {
+// SendErrorResponse writes a simple HTTP error response to the client.
+func SendErrorResponse(conn net.Conn, statusCode int) {
 	statusText := http.StatusText(statusCode)
 	body := fmt.Sprintf("<html><body><h1>%d %s</h1></body></html>", statusCode, statusText)
 
@@ -37,8 +40,8 @@ func sendErrorResponse(conn net.Conn, statusCode int) {
 	}
 }
 
-// serveStaticFile serves a file from the filesystem.
-func serveStaticFile(conn net.Conn, req *Request, loc *LocationConfig) {
+// ServeStaticFile serves a file from the filesystem.
+func ServeStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) {
 	// Construct the full file path safely.
 	path := filepath.Join(loc.Root, req.URI)
 
@@ -51,7 +54,7 @@ func serveStaticFile(conn net.Conn, req *Request, loc *LocationConfig) {
 	file, err := os.Open(path)
 	if err != nil {
 		log.Printf("File not found: %s", path)
-		sendErrorResponse(conn, http.StatusNotFound)
+		SendErrorResponse(conn, http.StatusNotFound)
 		return
 	}
 	defer file.Close()
@@ -87,20 +90,28 @@ func serveStaticFile(conn net.Conn, req *Request, loc *LocationConfig) {
 }
 
 // serveReverseProxy forwards a request to a backend service.
-func serveReverseProxy(conn net.Conn, req *Request, loc *LocationConfig) {
+func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) {
 	backendURL, err := url.Parse(loc.ProxyPass)
 	if err != nil {
 		log.Printf("Malformed proxy_pass URL: %s", loc.ProxyPass)
-		sendErrorResponse(conn, http.StatusInternalServerError)
+		SendErrorResponse(conn, http.StatusInternalServerError)
 		return
+	}
+
+	// Strip the location path from the request URI before forwarding.
+	// e.g., a request to /api/users becomes /users for the backend.
+	newURI := strings.TrimPrefix(req.URI, loc.Path)
+	// Ensure the new URI starts with a slash.
+	if !strings.HasPrefix(newURI, "/") {
+		newURI = "/" + newURI
 	}
 
 	// Create a new request to the backend.
 	// The backend receives the request URI from the original request.
-	backendReq, err := http.NewRequest(req.Method, backendURL.String()+req.URI, nil)
+	backendReq, err := http.NewRequest(req.Method, backendURL.String()+newURI, nil)
 	if err != nil {
 		log.Printf("Failed to create backend request: %v", err)
-		sendErrorResponse(conn, http.StatusInternalServerError)
+		SendErrorResponse(conn, http.StatusInternalServerError)
 		return
 	}
 
@@ -115,7 +126,7 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *LocationConfig) {
 	backendResp, err := http.DefaultClient.Do(backendReq)
 	if err != nil {
 		log.Printf("Failed to get response from backend: %v", err)
-		sendErrorResponse(conn, http.StatusBadGateway)
+		SendErrorResponse(conn, http.StatusBadGateway)
 		return
 	}
 	defer backendResp.Body.Close()
