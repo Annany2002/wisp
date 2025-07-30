@@ -22,3 +22,15 @@ Thumbs.db
 
 # Documentation
 README.md
+
+# temporary folders
+tmp
+wisp_test_site
+
+# Docker setup
+Dockerfile
+docker-compose
+.dockerignore
+
+# pem files
+*.pem

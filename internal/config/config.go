@@ -17,9 +17,11 @@ type LocationConfig struct {
 
 // ServerConfig holds directives for a 'server' block.
 type ServerConfig struct {
-	Listen     int
-	ServerName string
-	Locations  []LocationConfig
+	Listen            int
+	ServerName        string
+	Locations         []LocationConfig
+	SSLCertificate    string // the certificate file
+	SSLCertificateKey string //  the key file
 }
 
 // ParseConfig reads and parses a Wisp configuration file.
@@ -82,6 +84,10 @@ func Parse(filePath string) (*ServerConfig, error) {
 				config.Listen, _ = strconv.Atoi(value)
 			case "server_name":
 				config.ServerName = value
+			case "ssl_certificate":
+				config.SSLCertificate = value
+			case "ssl_certificate_key":
+				config.SSLCertificateKey = value
 			}
 		}
 	}

@@ -1,196 +1,112 @@
 # Wisp
 
-Wisp is a high-performance, minimalist web server and reverse proxy built from first principles in Go. It is inspired by the architecture and efficiency of Nginx but designed for simplicity and understandability. Wisp leverages Go's native goroutines to handle a massive number of connections with a minimal memory footprint.
+A minimalist web server and reverse proxy written in Go. Inspired by Nginx's architecture but designed for simplicity.
 
 ## Features
 
-The server implementation includes:
+- **Static File Server**: Serve static files with MIME type detection
+- **Reverse Proxy**: Route requests to backend services
+- **TLS Support**: HTTPS with custom certificates
+- **Nginx-style Config**: Familiar configuration syntax
+- **Path-based Routing**: Longest prefix matching for request routing
 
-- **High-Concurrency Core**: Uses a **goroutine-per-connection** model, allowing it to efficiently handle thousands of simultaneous clients with minimal memory footprint.
-- **Static File Serving**:
-  - Serves static assets like HTML, CSS, JavaScript, and images from configured root directories
-  - Automatic `index.html` detection in directories
-  - Content-Type detection based on file extensions
-  - Proper handling of file sizes and streaming for efficient delivery
-- **Reverse Proxy**:
-  - Forwards client requests to configured backend services
-  - Preserves original request headers
-  - Proper handling of backend responses and streaming
-  - Support for path-based routing to different backends
-- **Configuration-Driven**:
-  - Simple, human-readable `wisp.conf` file controls all behavior
-  - Support for multiple location blocks with different configurations
-  - Flexible routing based on URL paths
+## Quick Start
 
-## Configuration
+1. **Build and run**:
 
-Wisp's behavior is defined in a `wisp.conf` file. The configuration follows a simple, Nginx-like syntax and supports defining server properties and routing rules for different URL paths.
-
-### Basic Structure
-
-```
-server {
-    # Server-wide settings
-    listen 8080;           # Port to listen on
-    server_name wisp;      # Server name identifier
-
-    # Location blocks for routing
-    location / {
-        root ./path/to/static/files;  # Serve static files
-    }
-
-    location /api/ {
-        proxy_pass http://localhost:3000;  # Reverse proxy
-    }
-}
-```
-
-### Location Matching
-
-Location blocks are matched based on the longest prefix match. For example, with the following configuration:
-
-```
-location / {
-    root ./public;
-}
-
-location /api/ {
-    proxy_pass http://localhost:3000;
-}
-
-location /api/v2/ {
-    proxy_pass http://localhost:3001;
-}
-```
-
-- A request to `/index.html` matches the `/` location and serves from `./public`
-- A request to `/api/users` matches `/api/` and proxies to port 3000
-- A request to `/api/v2/users` matches `/api/v2/` and proxies to port 3001
-
-### Supported Directives
-
-Server block directives:
-
-- `listen`: Port number to listen on
-- `server_name`: Server identifier
-
-Location block directives:
-
-- `root`: Path to serve static files from
-- `proxy_pass`: URL to proxy requests to
-
-## How to run
-
-### Development Setup
-
-For development, you can use the included test site and configuration:
-
-1. The repository includes a `wisp_test_site` directory with a sample static website
-2. The default `wisp.conf` is configured to serve this test site and proxy `/api/` requests
-3. You can modify the test site or configuration to test different scenarios
-
-#### Using Air (Hot Reload)
-
-[Air](https://github.com/air-verse/air) provides live reloading for Go applications during development.
-
-1. Install Air (if not already installed):
    ```sh
-   go install github.com/air-verse/air@latest
+   go build -o wisp cmd/wisp/main.go
+   ./wisp
    ```
-2. From the project root, run:
+
+2. **With Docker**:
+
    ```sh
-   air
+   docker build -t wisp .
+   docker run -v $(pwd)/wisp.conf:/root/wisp.conf -p 8080:8080 wisp
    ```
-   This will automatically rebuild and restart the server when code changes are detected.
 
-### Using docker-compose
-
-1. To start the application using Docker Compose:
-
+3. **With Docker Compose**:
    ```sh
    docker compose up
    ```
 
-   This will start the wisp-server on port **8080**.
+## Configuration
 
-### Using docker
+Wisp uses `wisp.conf` with Nginx-style syntax:
 
-1. Build the image
-   ```sh
-   docker build -t wisp:tag-name .
-   ```
-2. Run the image
+```nginx
+server {
+    listen 8080;
+    server_name example.com;
 
-   ```sh
-   docker run -v $(pwd)/wisp.conf:/root/wisp.conf -p 8080:8080 wisp
-   ```
+    # Serve static files
+    location / {
+        root /var/www/site;
+    }
 
-   The server will start on port **8080**.
+    # Proxy to backend
+    location /api/ {
+        proxy_pass http://localhost:3000;
+    }
+}
+```
 
-### Standard Execution (Local)
+### HTTPS Setup
 
-1.  **Clone the repository:**
+```nginx
+server {
+    listen 8443;
+    server_name localhost;
 
-    ```sh
-    git clone https://github.com/Annany2002/wisp.git
-    cd wisp
-    ```
+    ssl_certificate     ./cert.pem;
+    ssl_certificate_key ./key.pem;
 
-2.  **Build the binary:**
+    location / {
+        root ./wisp_test_site;
+    }
+}
+```
 
-    ```sh
-    go build -o wisp cmd/wisp/main.go
-    ```
+### Routing
 
-3.  **Run the server:**
+Wisp matches requests to the most specific location:
 
-    ```sh
-    ./wisp
-    ```
+- `/about.html` → serves from `/var/www/site/about.html`
+- `/api/users` → proxies to `http://localhost:3000/users`
+- `/api/v2/users` → proxies to `http://localhost:3001/users` (if configured)
 
-Wisp will start and listen on the port defined in your `wisp.conf` file.
+## Development
+
+**Hot reload with Air**:
+
+```sh
+go install github.com/air-verse/air@latest
+air
+```
+
+**Test site included**: `wisp_test_site/` directory with sample files.
 
 ## Project Structure
 
 ```
-.
-├── cmd/
-│   └── wisp/
-│       └── main.go          # Entry point
+wisp/
+├── cmd/wisp/main.go          # Entry point
 ├── internal/
-│   ├── config/             # Configuration handling
-│   │   ├── config.go
-│   │   └── config_test.go
-│   └── server/             # Core server implementation
-│       ├── handler.go      # Request handlers
-│       ├── server.go       # Server logic
-│       └── server_test.go
-├── docker-compose.yml      # Docker compose configuration
-├── Dockerfile             # Docker build configuration
-├── go.mod                 # Go module definition
-├── README.md             # Documentation
-└── wisp.conf            # Server configuration
+│   ├── config/              # Configuration parsing
+│   └── server/              # HTTP server implementation
+├── wisp_test_site/          # Test static files
+├── wisp.conf               # Server configuration
+└── README.md
 ```
 
-## Future Enhancements
+## Configuration Reference
 
-The following improvements are planned for future versions:
-
-- **HTTP/2 Support**: Adding support for HTTP/2 protocol
-- **Virtual Hosting**: Supporting multiple `server { ... }` blocks to host different sites on the same instance
-- **Graceful Reloads**: The ability to reload the configuration without dropping active connections
-- **Enhanced Proxy Features**:
-  - WebSocket proxying
-  - Request body handling
-  - Load balancing
-  - Health checks
-- **Security Features**:
-  - TLS/HTTPS support
-  - Basic authentication
-  - Rate limiting
-  - IP filtering
-- **Caching Layer**: Adding support for response caching and cache control
-- **Logging Enhancements**:
-  - Configurable log formats
-  - Access and error logs
-  - Log rotation
+| Directive             | Description            | Example                             |
+| --------------------- | ---------------------- | ----------------------------------- |
+| `listen`              | Port to listen on      | `listen 8080;`                      |
+| `server_name`         | Server identifier      | `server_name api.example.com;`      |
+| `ssl_certificate`     | SSL certificate path   | `ssl_certificate ./cert.pem;`       |
+| `ssl_certificate_key` | SSL key path           | `ssl_certificate_key ./key.pem;`    |
+| `root`                | Static files directory | `root /var/www/site;`               |
+| `proxy_pass`          | Backend service URL    | `proxy_pass http://localhost:3000;` |

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
@@ -28,16 +29,32 @@ func New(cfg *config.ServerConfig) *Server {
 	return &Server{config: cfg}
 }
 
-// Start runs the main TCP listener loop.
+// Start runs the main listener loop, now with TLS capability.
 func (s *Server) Start() error {
+	var listener net.Listener
+	var err error
+
 	address := fmt.Sprintf(":%d", s.config.Listen)
-	listener, err := net.Listen("tcp", address)
+	// Conditionally create either a TLS or a standard TCP listener.
+	if s.config.SSLCertificate != "" && s.config.SSLCertificateKey != "" {
+		// Load the key pair from the files specified in the config.
+		cert, err := tls.LoadX509KeyPair(s.config.SSLCertificate, s.config.SSLCertificateKey)
+		if err != nil {
+			return fmt.Errorf("failed to load TLS key pair: %w", err)
+		}
+
+		tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+		listener, err = tls.Listen("tcp", address, tlsConfig)
+		log.Printf("Wisp secure server listening on %s", address)
+	} else {
+		listener, err = net.Listen("tcp", address)
+		log.Printf("Wisp server listening on %s", address)
+	}
+
 	if err != nil {
-		return fmt.Errorf("failed to start server on port %d: %w", s.config.Listen, err)
+		return fmt.Errorf("failed to start listener on %s: %w", address, err)
 	}
 	defer listener.Close()
-
-	log.Printf("Wisp server listening on %s", address)
 
 	for {
 		conn, err := listener.Accept()
