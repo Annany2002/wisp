@@ -16,8 +16,8 @@ import (
 	"github.com/Annany2002/wisp/internal/config"
 )
 
-// SendErrorResponse writes a simple HTTP error response to the client.
-func SendErrorResponse(conn net.Conn, statusCode int) {
+// sendErrorResponse writes a simple HTTP error response to the client.
+func sendErrorResponse(conn net.Conn, statusCode int) {
 	statusText := http.StatusText(statusCode)
 	body := fmt.Sprintf("<html><body><h1>%d %s</h1></body></html>", statusCode, statusText)
 
@@ -40,8 +40,8 @@ func SendErrorResponse(conn net.Conn, statusCode int) {
 	}
 }
 
-// ServeStaticFile serves a file from the filesystem.
-func ServeStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) {
+// serveStaticFile serves a file from the filesystem.
+func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) {
 	// Construct the full file path safely.
 	path := filepath.Join(loc.Root, req.URI)
 
@@ -54,7 +54,7 @@ func ServeStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) {
 	file, err := os.Open(path)
 	if err != nil {
 		log.Printf("File not found: %s", path)
-		SendErrorResponse(conn, http.StatusNotFound)
+		sendErrorResponse(conn, http.StatusNotFound)
 		return
 	}
 	defer file.Close()
@@ -94,7 +94,7 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) 
 	backendURL, err := url.Parse(loc.ProxyPass)
 	if err != nil {
 		log.Printf("Malformed proxy_pass URL: %s", loc.ProxyPass)
-		SendErrorResponse(conn, http.StatusInternalServerError)
+		sendErrorResponse(conn, http.StatusInternalServerError)
 		return
 	}
 
@@ -111,7 +111,7 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) 
 	backendReq, err := http.NewRequest(req.Method, backendURL.String()+newURI, nil)
 	if err != nil {
 		log.Printf("Failed to create backend request: %v", err)
-		SendErrorResponse(conn, http.StatusInternalServerError)
+		sendErrorResponse(conn, http.StatusInternalServerError)
 		return
 	}
 
@@ -126,7 +126,7 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) 
 	backendResp, err := http.DefaultClient.Do(backendReq)
 	if err != nil {
 		log.Printf("Failed to get response from backend: %v", err)
-		SendErrorResponse(conn, http.StatusBadGateway)
+		sendErrorResponse(conn, http.StatusBadGateway)
 		return
 	}
 	defer backendResp.Body.Close()

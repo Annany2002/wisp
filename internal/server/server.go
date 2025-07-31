@@ -35,6 +35,7 @@ func (s *Server) Start() error {
 	var err error
 
 	address := fmt.Sprintf(":%d", s.config.Listen)
+
 	// Conditionally create either a TLS or a standard TCP listener.
 	if s.config.SSLCertificate != "" && s.config.SSLCertificateKey != "" {
 		// Load the key pair from the files specified in the config.
@@ -62,7 +63,8 @@ func (s *Server) Start() error {
 			log.Printf("Failed to accept connection: %v", err)
 			continue
 		}
-		go s.handleConnection(conn) // Pass the server instance to the handler
+		// Pass the server instance to the handler
+		go s.handleConnection(conn)
 	}
 }
 
@@ -117,15 +119,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	// Dispatch to handlers
 	if location == nil {
-		SendErrorResponse(conn, 404)
+		sendErrorResponse(conn, 404)
 		return
 	}
 	if location.Root != "" {
-		ServeStaticFile(conn, &req, location)
+		serveStaticFile(conn, &req, location)
 	} else if location.ProxyPass != "" {
 		serveReverseProxy(conn, &req, location)
 	} else {
-		SendErrorResponse(conn, 500)
+		sendErrorResponse(conn, 500)
 	}
 }
 
