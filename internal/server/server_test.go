@@ -1,6 +1,7 @@
 package server
 
 import (
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,6 +80,54 @@ func TestIntegration(t *testing.T) {
 			}
 		})
 	}
+
+	// Test gzip compression for static files.
+	t.Run("Gzip Compression", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", wispAddr+"/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("Failed to send request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.Header.Get("Content-Encoding") != "gzip" {
+			t.Errorf("expected Content-Encoding: gzip, got '%s'", resp.Header.Get("Content-Encoding"))
+		}
+
+		gz, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			t.Fatalf("Failed to create gzip reader: %v", err)
+		}
+		defer gz.Close()
+
+		body, _ := io.ReadAll(gz)
+		if !strings.Contains(string(body), "Wisp static file") {
+			t.Errorf("expected decompressed body to contain 'Wisp static file', got '%s'", string(body))
+		}
+	})
+
+	// Test that non-gzip clients get uncompressed responses.
+	t.Run("No Gzip Without Accept-Encoding", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", wispAddr+"/", nil)
+		req.Header.Del("Accept-Encoding")
+
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("Failed to send request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.Header.Get("Content-Encoding") == "gzip" {
+			t.Error("did not expect gzip encoding when Accept-Encoding is absent")
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "Wisp static file") {
+			t.Errorf("expected body to contain 'Wisp static file', got '%s'", string(body))
+		}
+	})
 
 	// Test POST body forwarding through the reverse proxy.
 	t.Run("Reverse Proxy POST Body", func(t *testing.T) {

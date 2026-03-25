@@ -1,6 +1,7 @@
 package server
 
 import (
+	"compress/gzip"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +16,31 @@ import (
 
 	"github.com/Annany2002/wisp/internal/config"
 )
+
+// compressibleTypes lists MIME type prefixes that benefit from gzip compression.
+var compressibleTypes = []string{
+	"text/",
+	"application/json",
+	"application/javascript",
+	"application/xml",
+	"application/xhtml+xml",
+	"image/svg+xml",
+}
+
+// shouldCompress returns true if the content type is compressible and the
+// client advertises gzip support via Accept-Encoding.
+func shouldCompress(contentType string, req *Request) bool {
+	ae := req.Headers["Accept-Encoding"]
+	if !strings.Contains(ae, "gzip") {
+		return false
+	}
+	for _, prefix := range compressibleTypes {
+		if strings.HasPrefix(contentType, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // sendErrorResponse writes a simple HTTP error response to the client.
 func sendErrorResponse(conn net.Conn, statusCode int) {
@@ -85,23 +111,44 @@ func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) in
 		contentType = "application/octet-stream"
 	}
 
-	// Write headers.
-	responseHeaders := fmt.Sprintf(
-		"HTTP/1.1 200 OK\r\n"+
-			"Content-Type: %s\r\n"+
-			"Content-Length: %d\r\n"+
-			"Date: %s\r\n"+
-			"\r\n",
-		contentType,
-		fileSize,
-		time.Now().UTC().Format(time.RFC1123),
-	)
-	conn.Write([]byte(responseHeaders))
+	// Decide whether to compress the response.
+	if shouldCompress(contentType, req) {
+		// Use chunked transfer encoding since compressed size is unknown.
+		responseHeaders := fmt.Sprintf(
+			"HTTP/1.1 200 OK\r\n"+
+				"Content-Type: %s\r\n"+
+				"Content-Encoding: gzip\r\n"+
+				"Transfer-Encoding: chunked\r\n"+
+				"Vary: Accept-Encoding\r\n"+
+				"Date: %s\r\n"+
+				"\r\n",
+			contentType,
+			time.Now().UTC().Format(time.RFC1123),
+		)
+		conn.Write([]byte(responseHeaders))
 
-	// Stream the file content to the client.
-	_, err = io.Copy(conn, file)
-	if err != nil {
-		log.Printf("Failed to write file content: %v", err)
+		cw := newChunkedWriter(conn)
+		gz := gzip.NewWriter(cw)
+		io.Copy(gz, file)
+		gz.Close()
+		cw.Close()
+	} else {
+		responseHeaders := fmt.Sprintf(
+			"HTTP/1.1 200 OK\r\n"+
+				"Content-Type: %s\r\n"+
+				"Content-Length: %d\r\n"+
+				"Date: %s\r\n"+
+				"\r\n",
+			contentType,
+			fileSize,
+			time.Now().UTC().Format(time.RFC1123),
+		)
+		conn.Write([]byte(responseHeaders))
+
+		_, err = io.Copy(conn, file)
+		if err != nil {
+			log.Printf("Failed to write file content: %v", err)
+		}
 	}
 	return http.StatusOK
 }
@@ -158,4 +205,36 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) 
 	io.Copy(conn, backendResp.Body)
 
 	return backendResp.StatusCode
+}
+
+// chunkedWriter implements io.WriteCloser for HTTP chunked transfer encoding.
+type chunkedWriter struct {
+	conn net.Conn
+}
+
+func newChunkedWriter(conn net.Conn) *chunkedWriter {
+	return &chunkedWriter{conn: conn}
+}
+
+func (cw *chunkedWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	// Write chunk size in hex, then CRLF, then data, then CRLF.
+	header := fmt.Sprintf("%x\r\n", len(p))
+	if _, err := cw.conn.Write([]byte(header)); err != nil {
+		return 0, err
+	}
+	n, err := cw.conn.Write(p)
+	if err != nil {
+		return n, err
+	}
+	_, err = cw.conn.Write([]byte("\r\n"))
+	return n, err
+}
+
+// Close writes the terminating zero-length chunk.
+func (cw *chunkedWriter) Close() error {
+	_, err := cw.conn.Write([]byte("0\r\n\r\n"))
+	return err
 }
