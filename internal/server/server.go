@@ -19,6 +19,8 @@ const (
 	readTimeout = 30 * time.Second
 	// writeTimeout is the maximum duration for writing the response.
 	writeTimeout = 30 * time.Second
+	// keepAliveTimeout is the maximum idle time between requests on a persistent connection.
+	keepAliveTimeout = 60 * time.Second
 )
 
 // Server represents the Wisp server instance.
@@ -92,86 +94,97 @@ func (s *Server) Shutdown() error {
 	return nil
 }
 
-// handleConnection now uses the server's config field 's.config'.
+// handleConnection reads one or more HTTP requests from a persistent connection.
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	// Set read and write deadlines to prevent slow-client attacks.
-	conn.SetReadDeadline(time.Now().Add(readTimeout))
-	conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-
-	// Use a buffered reader for efficient I/O.
 	reader := bufio.NewReader(conn)
 
-	// Read the first line from the connection, which is the request line.
-	requestLine, _ := reader.ReadString('\n')
-	parts := strings.Fields(requestLine)
-	if len(parts) != 3 {
-		return
-	}
-	req := Request{
-		Method:  parts[0],
-		URI:     parts[1],
-		Version: parts[2],
-		Headers: make(map[string]string),
-	}
-
-	// Loop to read and parse headers until a blank line is found
 	for {
-		headerLine, err := reader.ReadString('\n')
+		// Set a read deadline: tight for the first request, longer for keep-alive idle.
+		conn.SetReadDeadline(time.Now().Add(keepAliveTimeout))
+
+		// Read the request line.
+		requestLine, err := reader.ReadString('\n')
 		if err != nil {
-			log.Printf("Failed to read header: %v", err)
+			return // Client closed or timed out — exit silently.
+		}
+
+		// Once we have a request line, enforce a stricter read timeout.
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+
+		parts := strings.Fields(requestLine)
+		if len(parts) != 3 {
 			return
 		}
-
-		// A blank line (\r\n) signifies line break
-		if headerLine == "\r\n" {
-			break
+		req := Request{
+			Method:  parts[0],
+			URI:     parts[1],
+			Version: parts[2],
+			Headers: make(map[string]string),
 		}
 
-		// Split the header line into key and value
-		headerParts := strings.SplitN(headerLine, ":", 2)
-		if len(headerParts) != 2 {
-			log.Printf("Malformed header: %s", headerLine)
-			continue
+		// Parse headers until blank line.
+		for {
+			headerLine, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if headerLine == "\r\n" {
+				break
+			}
+
+			headerParts := strings.SplitN(headerLine, ":", 2)
+			if len(headerParts) != 2 {
+				continue
+			}
+
+			key := strings.TrimSpace(headerParts[0])
+			value := strings.TrimSpace(headerParts[1])
+			req.Headers[key] = value
 		}
 
-		// Extract the key and value
-		key := strings.TrimSpace(headerParts[0])
-		value := strings.TrimSpace(headerParts[1])
-		req.Headers[key] = value
-	}
+		// Read the request body if Content-Length is specified.
+		if cl, ok := req.Headers["Content-Length"]; ok {
+			length, err := strconv.ParseInt(cl, 10, 64)
+			if err == nil && length > 0 {
+				req.Body = io.LimitReader(reader, length)
+			}
+		}
 
-	// Read the request body if Content-Length is specified.
-	if cl, ok := req.Headers["Content-Length"]; ok {
-		length, err := strconv.ParseInt(cl, 10, 64)
-		if err == nil && length > 0 {
-			req.Body = io.LimitReader(reader, length)
+		// Set write deadline for the response.
+		conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+
+		// Route and dispatch.
+		location := s.routeRequest(&req)
+		start := time.Now()
+		var statusCode int
+
+		if location == nil {
+			statusCode = 404
+			sendErrorResponse(conn, statusCode)
+		} else if location.Root != "" {
+			statusCode = serveStaticFile(conn, &req, location)
+		} else if location.ProxyPass != "" {
+			statusCode = serveReverseProxy(conn, &req, location)
+		} else {
+			statusCode = 500
+			sendErrorResponse(conn, statusCode)
+		}
+
+		log.Printf("%s %s %s %d %s",
+			conn.RemoteAddr(), req.Method, req.URI, statusCode, time.Since(start))
+
+		// Drain any unread request body before the next request.
+		if req.Body != nil {
+			io.Copy(io.Discard, req.Body)
+		}
+
+		// Check if the client wants to close the connection.
+		if strings.EqualFold(req.Headers["Connection"], "close") || req.Version == "HTTP/1.0" {
+			return
 		}
 	}
-
-	// Use the router to find the correct location for this request.
-	location := s.routeRequest(&req)
-
-	start := time.Now()
-	var statusCode int
-
-	// Dispatch to handlers.
-	if location == nil {
-		statusCode = 404
-		sendErrorResponse(conn, statusCode)
-	} else if location.Root != "" {
-		statusCode = serveStaticFile(conn, &req, location)
-	} else if location.ProxyPass != "" {
-		statusCode = serveReverseProxy(conn, &req, location)
-	} else {
-		statusCode = 500
-		sendErrorResponse(conn, statusCode)
-	}
-
-	// Access log: client_ip method uri status duration
-	log.Printf("%s %s %s %d %s",
-		conn.RemoteAddr(), req.Method, req.URI, statusCode, time.Since(start))
 }
 
 // routeRequest finds the best location configuration for a given request.
