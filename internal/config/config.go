@@ -21,19 +21,27 @@ type ServerConfig struct {
 	ServerName        string
 	Locations         []LocationConfig
 	SSLCertificate    string // the certificate file
-	SSLCertificateKey string //  the key file
+	SSLCertificateKey string // the key file
 }
 
-// ParseConfig reads and parses a Wisp configuration file.
-func Parse(filePath string) (*ServerConfig, error) {
+// Config is the top-level configuration containing all server blocks.
+type Config struct {
+	Servers []ServerConfig
+}
+
+// Parse reads and parses a Wisp configuration file.
+// It returns a Config containing all parsed server blocks.
+func Parse(filePath string) (*Config, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("could not open config file: %w", err)
 	}
 	defer file.Close()
 
-	var config ServerConfig
+	var cfg Config
+	var currentServer *ServerConfig
 	var currentLoc *LocationConfig
+	depth := 0 // Track brace nesting depth.
 	scanner := bufio.NewScanner(file)
 
 	for scanner.Scan() {
@@ -51,22 +59,50 @@ func Parse(filePath string) (*ServerConfig, error) {
 
 		directive := parts[0]
 
+		// Handle 'server {' — start a new server block.
+		if directive == "server" && len(parts) == 2 && parts[1] == "{" {
+			cfg.Servers = append(cfg.Servers, ServerConfig{})
+			currentServer = &cfg.Servers[len(cfg.Servers)-1]
+			currentLoc = nil
+			depth = 1
+			continue
+		}
+
+		// Handle 'location <path> {' — start a location block within a server.
 		if directive == "location" && len(parts) == 3 && parts[2] == "{" {
+			if currentServer == nil {
+				return nil, fmt.Errorf("location block outside of server block")
+			}
 			loc := LocationConfig{Path: parts[1]}
-			config.Locations = append(config.Locations, loc)
-			currentLoc = &config.Locations[len(config.Locations)-1] // Get a pointer to the new location
+			currentServer.Locations = append(currentServer.Locations, loc)
+			currentLoc = &currentServer.Locations[len(currentServer.Locations)-1]
+			depth = 2
 			continue
 		}
 
-		// Check for closing brace '}'
+		// Handle closing brace '}'.
 		if directive == "}" {
-			currentLoc = nil // Exit location block context
+			if depth == 2 {
+				// Closing a location block.
+				currentLoc = nil
+				depth = 1
+			} else if depth == 1 {
+				// Closing a server block.
+				currentServer = nil
+				currentLoc = nil
+				depth = 0
+			}
 			continue
 		}
 
-		// Handle directives inside a location block
-		if currentLoc != nil && len(parts) >= 2 {
-			value := strings.Trim(parts[1], ";")
+		if len(parts) < 2 {
+			continue
+		}
+
+		value := strings.Trim(parts[1], ";")
+
+		// Handle directives inside a location block.
+		if currentLoc != nil {
 			switch directive {
 			case "root":
 				currentLoc.Root = value
@@ -76,18 +112,17 @@ func Parse(filePath string) (*ServerConfig, error) {
 			continue
 		}
 
-		// Handle server-level directives
-		if len(parts) >= 2 {
-			value := strings.Trim(parts[1], ";")
+		// Handle server-level directives.
+		if currentServer != nil {
 			switch directive {
 			case "listen":
-				config.Listen, _ = strconv.Atoi(value)
+				currentServer.Listen, _ = strconv.Atoi(value)
 			case "server_name":
-				config.ServerName = value
+				currentServer.ServerName = value
 			case "ssl_certificate":
-				config.SSLCertificate = value
+				currentServer.SSLCertificate = value
 			case "ssl_certificate_key":
-				config.SSLCertificateKey = value
+				currentServer.SSLCertificateKey = value
 			}
 		}
 	}
@@ -96,5 +131,9 @@ func Parse(filePath string) (*ServerConfig, error) {
 		return nil, fmt.Errorf("error reading config file: %w", err)
 	}
 
-	return &config, nil
+	if len(cfg.Servers) == 0 {
+		return nil, fmt.Errorf("no server blocks found in config")
+	}
+
+	return &cfg, nil
 }

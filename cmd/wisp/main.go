@@ -14,8 +14,8 @@ func main() {
 		log.Fatalf("Error loading configuration: %v", err)
 	}
 
-	// Create a new server instance
-	srv := server.New(cfg)
+	// Create a new server instance using the first server block.
+	srv := server.New(&cfg.Servers[0])
 
 	// Start the server
 	if err := srv.Start(); err != nil {
