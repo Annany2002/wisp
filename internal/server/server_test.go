@@ -15,12 +15,14 @@ import (
 )
 
 func TestIntegration(t *testing.T) {
-	// NOTE: The setup helper has a simplification for port handling.
-	// In a real project, you would synchronize to get the random port.
-	// For now, we will manually create and start the server here to control the port.
-
 	// 1. Setup Backend and Static Files
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Echo back the request body for POST requests.
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			fmt.Fprintf(w, "echo:%s", string(body))
+			return
+		}
 		fmt.Fprintln(w, "Hello from backend")
 	}))
 	defer backend.Close()
@@ -77,4 +79,19 @@ func TestIntegration(t *testing.T) {
 			}
 		})
 	}
+
+	// Test POST body forwarding through the reverse proxy.
+	t.Run("Reverse Proxy POST Body", func(t *testing.T) {
+		reqBody := `{"name":"wisp"}`
+		resp, err := http.Post(wispAddr+"/api/echo", "application/json", strings.NewReader(reqBody))
+		if err != nil {
+			t.Fatalf("Failed to send POST request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "echo:"+reqBody) {
+			t.Errorf("expected echoed body, got '%s'", string(body))
+		}
+	})
 }

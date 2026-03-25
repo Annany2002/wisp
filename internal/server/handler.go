@@ -122,9 +122,8 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) 
 		newURI = "/" + newURI
 	}
 
-	// Create a new request to the backend.
-	// The backend receives the request URI from the original request.
-	backendReq, err := http.NewRequest(req.Method, backendURL.String()+newURI, nil)
+	// Create a new request to the backend, forwarding the body if present.
+	backendReq, err := http.NewRequest(req.Method, backendURL.String()+newURI, req.Body)
 	if err != nil {
 		log.Printf("Failed to create backend request: %v", err)
 		sendErrorResponse(conn, http.StatusInternalServerError)

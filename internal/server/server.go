@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +33,7 @@ type Request struct {
 	URI     string
 	Version string
 	Headers map[string]string
+	Body    io.Reader
 }
 
 // New creates a new Wisp server instance.
@@ -137,6 +140,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 		key := strings.TrimSpace(headerParts[0])
 		value := strings.TrimSpace(headerParts[1])
 		req.Headers[key] = value
+	}
+
+	// Read the request body if Content-Length is specified.
+	if cl, ok := req.Headers["Content-Length"]; ok {
+		length, err := strconv.ParseInt(cl, 10, 64)
+		if err == nil && length > 0 {
+			req.Body = io.LimitReader(reader, length)
+		}
 	}
 
 	// Use the router to find the correct location for this request.
