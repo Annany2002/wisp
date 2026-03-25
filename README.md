@@ -131,20 +131,6 @@ go test ./...
 
 **Test site included**: `wisp_test_site/` directory with sample files.
 
-## Project Structure
-
-```
-wisp/
-├── cmd/wisp/main.go          # Entry point with CLI flags and signal handling
-├── internal/
-│   ├── config/               # Nginx-style configuration parser
-│   └── server/               # HTTP server, router, and handlers
-├── wisp_test_site/           # Test static files
-├── wisp.conf                 # Server configuration
-├── Dockerfile                # Multi-stage Docker build
-└── docker-compose.yml
-```
-
 ## Configuration Reference
 
 | Directive             | Context  | Description            | Example                             |
