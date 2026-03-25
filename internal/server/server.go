@@ -7,8 +7,16 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/Annany2002/wisp/internal/config"
+)
+
+const (
+	// readTimeout is the maximum duration for reading the entire request.
+	readTimeout = 30 * time.Second
+	// writeTimeout is the maximum duration for writing the response.
+	writeTimeout = 30 * time.Second
 )
 
 // Server represents the Wisp server instance.
@@ -71,6 +79,10 @@ func (s *Server) Start() error {
 // handleConnection now uses the server's config field 's.config'.
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
+
+	// Set read and write deadlines to prevent slow-client attacks.
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
+	conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 
 	// Use a buffered reader for efficient I/O.
 	reader := bufio.NewReader(conn)
