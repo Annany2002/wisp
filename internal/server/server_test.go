@@ -6,13 +6,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Annany2002/wisp/internal/config"
+	"github.com/Annany2002/wisp/internal/upstream"
 )
 
 func TestIntegration(t *testing.T) {
@@ -40,7 +43,7 @@ func TestIntegration(t *testing.T) {
 			{Path: "/api/", ProxyPass: backend.URL},
 		},
 	}
-	srv := New(cfg)
+	srv := New(cfg, nil)
 	go srv.Start()
 	time.Sleep(50 * time.Millisecond) // Give server time to start
 
@@ -143,4 +146,132 @@ func TestIntegration(t *testing.T) {
 			t.Errorf("expected echoed body, got '%s'", string(body))
 		}
 	})
+}
+
+func TestLoadBalancingRoundRobin(t *testing.T) {
+	// Create 3 backend servers, each identifying themselves.
+	var hitCount [3]atomic.Int64
+	backends := make([]*httptest.Server, 3)
+	for i := range backends {
+		idx := i
+		backends[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hitCount[idx].Add(1)
+			fmt.Fprintf(w, "backend-%d", idx)
+		}))
+		defer backends[i].Close()
+	}
+
+	// Build upstream config pointing to the 3 backends.
+	backendAddrs := make([]config.UpstreamBackend, 3)
+	for i, b := range backends {
+		u, _ := url.Parse(b.URL)
+		backendAddrs[i] = config.UpstreamBackend{Address: u.Host, Weight: 1}
+	}
+
+	upCfg := &config.UpstreamConfig{
+		Name:     "testbackend",
+		Method:   "round_robin",
+		Backends: backendAddrs,
+	}
+	upstreams := map[string]*upstream.Upstream{
+		"testbackend": upstream.New(upCfg),
+	}
+
+	testPort := 8991
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{Path: "/api/", ProxyPass: "http://testbackend"},
+		},
+	}
+	srv := New(cfg, upstreams)
+	go srv.Start()
+	time.Sleep(50 * time.Millisecond)
+
+	wispAddr := fmt.Sprintf("http://localhost:%d", testPort)
+
+	// Send 6 requests — should round-robin evenly across 3 backends.
+	responses := make([]string, 6)
+	for i := range responses {
+		resp, err := http.Get(wispAddr + "/api/test")
+		if err != nil {
+			t.Fatalf("Request %d failed: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		responses[i] = string(body)
+	}
+
+	// Verify each backend was hit exactly twice.
+	for i, count := range hitCount {
+		if count.Load() != 2 {
+			t.Errorf("backend-%d: expected 2 hits, got %d", i, count.Load())
+		}
+	}
+
+	// Verify round-robin order.
+	expected := []string{"backend-0", "backend-1", "backend-2", "backend-0", "backend-1", "backend-2"}
+	for i, resp := range responses {
+		if !strings.Contains(resp, expected[i]) {
+			t.Errorf("request %d: expected %s, got %s", i, expected[i], resp)
+		}
+	}
+}
+
+func TestLoadBalancingFailover(t *testing.T) {
+	// Create 2 backends. Second one will be marked down.
+	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "alive-backend")
+	}))
+	defer backend1.Close()
+
+	backend2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "dead-backend")
+	}))
+	// Close backend2 immediately to simulate it being down.
+	backend2.Close()
+
+	u1, _ := url.Parse(backend1.URL)
+	u2, _ := url.Parse(backend2.URL)
+
+	upCfg := &config.UpstreamConfig{
+		Name:   "failover",
+		Method: "round_robin",
+		Backends: []config.UpstreamBackend{
+			{Address: u1.Host, Weight: 1},
+			{Address: u2.Host, Weight: 1},
+		},
+	}
+	up := upstream.New(upCfg)
+	// Mark the dead backend as down.
+	up.Backends[1].Alive.Store(false)
+
+	upstreams := map[string]*upstream.Upstream{"failover": up}
+
+	testPort := 8992
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{Path: "/", ProxyPass: "http://failover"},
+		},
+	}
+	srv := New(cfg, upstreams)
+	go srv.Start()
+	time.Sleep(50 * time.Millisecond)
+
+	wispAddr := fmt.Sprintf("http://localhost:%d", testPort)
+
+	// All requests should go to the alive backend.
+	for i := 0; i < 4; i++ {
+		resp, err := http.Get(wispAddr + "/test")
+		if err != nil {
+			t.Fatalf("Request %d failed: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if !strings.Contains(string(body), "alive-backend") {
+			t.Errorf("request %d: expected alive-backend, got %s", i, string(body))
+		}
+	}
 }

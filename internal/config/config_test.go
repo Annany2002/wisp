@@ -121,6 +121,111 @@ func TestParseNoServerBlock(t *testing.T) {
 	}
 }
 
+func TestParseUpstreamBlock(t *testing.T) {
+	configContent := `
+upstream backend {
+    method round_robin;
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3002;
+    server 127.0.0.1:3003 weight=3;
+}
+
+server {
+    listen 8080;
+
+    location /api/ {
+        proxy_pass http://backend;
+    }
+}
+`
+	tempDir := t.TempDir()
+	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
+	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
+
+	cfg, err := Parse(tempConfigFile)
+	if err != nil {
+		t.Fatalf("Parse() returned an unexpected error: %v", err)
+	}
+
+	if len(cfg.Upstreams) != 1 {
+		t.Fatalf("expected 1 upstream block, got %d", len(cfg.Upstreams))
+	}
+
+	up := cfg.Upstreams[0]
+	if up.Name != "backend" {
+		t.Errorf("expected upstream name 'backend', got '%s'", up.Name)
+	}
+	if up.Method != "round_robin" {
+		t.Errorf("expected method 'round_robin', got '%s'", up.Method)
+	}
+	if len(up.Backends) != 3 {
+		t.Fatalf("expected 3 backends, got %d", len(up.Backends))
+	}
+	if up.Backends[0].Address != "127.0.0.1:3001" {
+		t.Errorf("expected first backend '127.0.0.1:3001', got '%s'", up.Backends[0].Address)
+	}
+	if up.Backends[2].Weight != 3 {
+		t.Errorf("expected third backend weight 3, got %d", up.Backends[2].Weight)
+	}
+	if up.Backends[0].Weight != 1 {
+		t.Errorf("expected default weight 1, got %d", up.Backends[0].Weight)
+	}
+}
+
+func TestParseUpstreamLeastConn(t *testing.T) {
+	configContent := `
+upstream api {
+    method least_conn;
+    server 10.0.0.1:8080;
+    server 10.0.0.2:8080;
+}
+
+server {
+    listen 80;
+
+    location / {
+        proxy_pass http://api;
+    }
+}
+`
+	tempDir := t.TempDir()
+	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
+	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
+
+	cfg, err := Parse(tempConfigFile)
+	if err != nil {
+		t.Fatalf("Parse() returned an unexpected error: %v", err)
+	}
+
+	if cfg.Upstreams[0].Method != "least_conn" {
+		t.Errorf("expected method 'least_conn', got '%s'", cfg.Upstreams[0].Method)
+	}
+}
+
+func TestParseUpstreamInvalidMethod(t *testing.T) {
+	configContent := `
+upstream bad {
+    method random;
+    server 127.0.0.1:3001;
+}
+
+server {
+    listen 80;
+    location / {
+        proxy_pass http://bad;
+    }
+}
+`
+	tempDir := t.TempDir()
+	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
+	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
+
+	_, err := Parse(tempConfigFile)
+	if err == nil {
+		t.Error("expected error for invalid upstream method, got nil")
+	}
+}
+
 func TestParseLocationOutsideServer(t *testing.T) {
 	configContent := `
 location / {
