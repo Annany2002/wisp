@@ -22,11 +22,14 @@ func main() {
 		log.Fatalf("Error loading configuration: %v", err)
 	}
 
-	// Build the upstream map from config.
+	// Build the upstream map from config and start health checks.
 	upstreams := make(map[string]*upstream.Upstream, len(cfg.Upstreams))
+	var healthCheckStops []func()
 	for i := range cfg.Upstreams {
 		u := upstream.New(&cfg.Upstreams[i])
 		upstreams[u.Name] = u
+		stop := u.StartHealthChecks()
+		healthCheckStops = append(healthCheckStops, stop)
 		log.Printf("Upstream '%s' configured with %d backends (%s)",
 			u.Name, len(u.Backends), cfg.Upstreams[i].Method)
 	}
@@ -52,6 +55,11 @@ func main() {
 
 	go func() {
 		<-sigCh
+		// Stop health checks.
+		for _, stop := range healthCheckStops {
+			stop()
+		}
+		// Shutdown all servers.
 		for _, srv := range servers {
 			if err := srv.Shutdown(); err != nil {
 				log.Printf("Error during shutdown: %v", err)
