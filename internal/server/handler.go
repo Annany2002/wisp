@@ -42,8 +42,24 @@ func sendErrorResponse(conn net.Conn, statusCode int) {
 
 // serveStaticFile serves a file from the filesystem.
 func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) {
-	// Construct the full file path safely.
-	path := filepath.Join(loc.Root, req.URI)
+	// Resolve the root to an absolute path for safe comparison.
+	absRoot, err := filepath.Abs(loc.Root)
+	if err != nil {
+		log.Printf("Failed to resolve root path: %v", err)
+		sendErrorResponse(conn, http.StatusInternalServerError)
+		return
+	}
+
+	// Clean the URI and join with root to get the target path.
+	cleanURI := filepath.Clean(req.URI)
+	path := filepath.Join(absRoot, cleanURI)
+
+	// Prevent path traversal: ensure the resolved path is within the root.
+	if !strings.HasPrefix(path, absRoot+string(filepath.Separator)) && path != absRoot {
+		log.Printf("Path traversal attempt blocked: %s", req.URI)
+		sendErrorResponse(conn, http.StatusForbidden)
+		return
+	}
 
 	// If the path is a directory, look for an index.html file.
 	if stat, err := os.Stat(path); err == nil && stat.IsDir() {

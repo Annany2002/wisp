@@ -72,6 +72,46 @@ func setupTestEnvironment(t *testing.T) (string, func()) {
 	}
 }
 
+func TestPathTraversalPrevention(t *testing.T) {
+	// Create a parent directory with a secret file outside the static root.
+	parentDir := t.TempDir()
+	secretPath := filepath.Join(parentDir, "secret.txt")
+	os.WriteFile(secretPath, []byte("TOP SECRET"), 0644)
+
+	// The static root is a subdirectory — the secret file is outside it.
+	staticDir := filepath.Join(parentDir, "public")
+	os.MkdirAll(staticDir, 0755)
+	os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("public page"), 0644)
+
+	testPort := 8990
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{Path: "/", Root: staticDir},
+		},
+	}
+	srv := New(cfg)
+	go srv.Start()
+	time.Sleep(50 * time.Millisecond)
+
+	wispAddr := fmt.Sprintf("http://localhost:%d", testPort)
+
+	// Attempt to read the secret file via path traversal.
+	resp, err := http.Get(wispAddr + "/../secret.txt")
+	if err != nil {
+		t.Fatalf("Failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "TOP SECRET") {
+		t.Error("path traversal succeeded — secret file was served")
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("expected non-200 status for traversal attempt, got %d", resp.StatusCode)
+	}
+}
+
 func TestIntegration(t *testing.T) {
 	// NOTE: The setup helper has a simplification for port handling.
 	// In a real project, you would synchronize to get the random port.
@@ -110,6 +150,7 @@ func TestIntegration(t *testing.T) {
 	}{
 		{"Static File Success", "/", http.StatusOK, "Wisp static file"},
 		{"Static File Not Found", "/not-found.html", http.StatusNotFound, "Not Found"},
+		{"Path Traversal Blocked", "/../../../etc/passwd", http.StatusNotFound, "Not Found"},
 		{"Reverse Proxy Success", "/api/test", http.StatusOK, "Hello from backend"},
 	}
 
