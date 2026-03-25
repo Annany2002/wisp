@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 
 	"github.com/Annany2002/wisp/internal/config"
@@ -8,8 +9,11 @@ import (
 )
 
 func main() {
+	configPath := flag.String("c", "wisp.conf", "path to configuration file")
+	flag.Parse()
+
 	// Load Configuration
-	cfg, err := config.Parse("wisp.conf")
+	cfg, err := config.Parse(*configPath)
 	if err != nil {
 		log.Fatalf("Error loading configuration: %v", err)
 	}
