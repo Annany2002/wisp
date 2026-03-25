@@ -40,7 +40,7 @@ func TestIntegration(t *testing.T) {
 			{Path: "/api/", ProxyPass: backend.URL},
 		},
 	}
-	srv := New(cfg)
+	srv := New(cfg, nil)
 	go srv.Start()
 	time.Sleep(50 * time.Millisecond) // Give server time to start
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Annany2002/wisp/internal/config"
+	"github.com/Annany2002/wisp/internal/upstream"
 )
 
 // compressibleTypes lists MIME type prefixes that benefit from gzip compression.
@@ -153,14 +154,47 @@ func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) in
 	return http.StatusOK
 }
 
+// resolveBackendURL resolves a proxy_pass value to an actual backend URL.
+// If the host matches an upstream name, a backend is selected via the load balancer.
+// Returns the resolved URL and an optional backend (for connection tracking).
+func resolveBackendURL(proxyPass string, upstreams map[string]*upstream.Upstream) (*url.URL, *upstream.Backend, error) {
+	parsed, err := url.Parse(proxyPass)
+	if err != nil {
+		return nil, nil, fmt.Errorf("malformed proxy_pass URL: %s", proxyPass)
+	}
+
+	// Check if the host refers to an upstream group.
+	if upstreams != nil {
+		if u, ok := upstreams[parsed.Hostname()]; ok {
+			backend, err := u.Next()
+			if err != nil {
+				return nil, nil, err
+			}
+			// Replace the host with the selected backend address.
+			resolved := *parsed
+			resolved.Host = backend.Address
+			return &resolved, backend, nil
+		}
+	}
+
+	// Direct URL — no upstream resolution needed.
+	return parsed, nil, nil
+}
+
 // serveReverseProxy forwards a request to a backend service.
 // Returns the HTTP status code sent to the client.
-func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) int {
-	backendURL, err := url.Parse(loc.ProxyPass)
+func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, upstreams map[string]*upstream.Upstream) int {
+	backendURL, backend, err := resolveBackendURL(loc.ProxyPass, upstreams)
 	if err != nil {
-		log.Printf("Malformed proxy_pass URL: %s", loc.ProxyPass)
-		sendErrorResponse(conn, http.StatusInternalServerError)
-		return http.StatusInternalServerError
+		log.Printf("Backend resolution failed: %v", err)
+		sendErrorResponse(conn, http.StatusBadGateway)
+		return http.StatusBadGateway
+	}
+
+	// Track active connections for least_conn.
+	if backend != nil {
+		backend.ActiveConns.Add(1)
+		defer backend.ActiveConns.Add(-1)
 	}
 
 	// Strip the location path from the request URI before forwarding.
@@ -186,7 +220,11 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) 
 	// Send the request to the backend.
 	backendResp, err := http.DefaultClient.Do(backendReq)
 	if err != nil {
-		log.Printf("Failed to get response from backend: %v", err)
+		log.Printf("Failed to get response from backend %s: %v", backendURL.Host, err)
+		// Mark backend as unhealthy on connection failure.
+		if backend != nil {
+			backend.Alive.Store(false)
+		}
 		sendErrorResponse(conn, http.StatusBadGateway)
 		return http.StatusBadGateway
 	}

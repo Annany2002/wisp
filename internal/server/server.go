@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Annany2002/wisp/internal/config"
+	"github.com/Annany2002/wisp/internal/upstream"
 )
 
 const (
@@ -25,8 +26,9 @@ const (
 
 // Server represents the Wisp server instance.
 type Server struct {
-	config   *config.ServerConfig
-	listener net.Listener
+	config    *config.ServerConfig
+	listener  net.Listener
+	upstreams map[string]*upstream.Upstream
 }
 
 // Request holds parsed HTTP request data.
@@ -38,9 +40,9 @@ type Request struct {
 	Body    io.Reader
 }
 
-// New creates a new Wisp server instance.
-func New(cfg *config.ServerConfig) *Server {
-	return &Server{config: cfg}
+// New creates a new Wisp server instance with optional upstream groups.
+func New(cfg *config.ServerConfig, upstreams map[string]*upstream.Upstream) *Server {
+	return &Server{config: cfg, upstreams: upstreams}
 }
 
 // Start runs the main listener loop with TLS capability.
@@ -166,7 +168,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		} else if location.Root != "" {
 			statusCode = serveStaticFile(conn, &req, location)
 		} else if location.ProxyPass != "" {
-			statusCode = serveReverseProxy(conn, &req, location)
+			statusCode = serveReverseProxy(conn, &req, location, s.upstreams)
 		} else {
 			statusCode = 500
 			sendErrorResponse(conn, statusCode)
