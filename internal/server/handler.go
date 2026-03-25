@@ -41,13 +41,14 @@ func sendErrorResponse(conn net.Conn, statusCode int) {
 }
 
 // serveStaticFile serves a file from the filesystem.
-func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) {
+// Returns the HTTP status code sent to the client.
+func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) int {
 	// Resolve the root to an absolute path for safe comparison.
 	absRoot, err := filepath.Abs(loc.Root)
 	if err != nil {
 		log.Printf("Failed to resolve root path: %v", err)
 		sendErrorResponse(conn, http.StatusInternalServerError)
-		return
+		return http.StatusInternalServerError
 	}
 
 	// Clean the URI and join with root to get the target path.
@@ -58,7 +59,7 @@ func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) {
 	if !strings.HasPrefix(path, absRoot+string(filepath.Separator)) && path != absRoot {
 		log.Printf("Path traversal attempt blocked: %s", req.URI)
 		sendErrorResponse(conn, http.StatusForbidden)
-		return
+		return http.StatusForbidden
 	}
 
 	// If the path is a directory, look for an index.html file.
@@ -69,9 +70,8 @@ func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) {
 	// Try to open the file.
 	file, err := os.Open(path)
 	if err != nil {
-		log.Printf("File not found: %s", path)
 		sendErrorResponse(conn, http.StatusNotFound)
-		return
+		return http.StatusNotFound
 	}
 	defer file.Close()
 
@@ -82,10 +82,10 @@ func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) {
 	// Determine the Content-Type header from the file extension.
 	contentType := mime.TypeByExtension(filepath.Ext(path))
 	if contentType == "" {
-		contentType = "application/octet-stream" // Default binary type
+		contentType = "application/octet-stream"
 	}
 
-	// Write headers
+	// Write headers.
 	responseHeaders := fmt.Sprintf(
 		"HTTP/1.1 200 OK\r\n"+
 			"Content-Type: %s\r\n"+
@@ -103,21 +103,21 @@ func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) {
 	if err != nil {
 		log.Printf("Failed to write file content: %v", err)
 	}
+	return http.StatusOK
 }
 
 // serveReverseProxy forwards a request to a backend service.
-func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) {
+// Returns the HTTP status code sent to the client.
+func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) int {
 	backendURL, err := url.Parse(loc.ProxyPass)
 	if err != nil {
 		log.Printf("Malformed proxy_pass URL: %s", loc.ProxyPass)
 		sendErrorResponse(conn, http.StatusInternalServerError)
-		return
+		return http.StatusInternalServerError
 	}
 
 	// Strip the location path from the request URI before forwarding.
-	// e.g., a request to /api/users becomes /users for the backend.
 	newURI := strings.TrimPrefix(req.URI, loc.Path)
-	// Ensure the new URI starts with a slash.
 	if !strings.HasPrefix(newURI, "/") {
 		newURI = "/" + newURI
 	}
@@ -127,14 +127,13 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) 
 	if err != nil {
 		log.Printf("Failed to create backend request: %v", err)
 		sendErrorResponse(conn, http.StatusInternalServerError)
-		return
+		return http.StatusInternalServerError
 	}
 
 	// Copy headers from the original request to the new backend request.
 	for key, value := range req.Headers {
 		backendReq.Header.Set(key, value)
 	}
-	// Set the Host header to the backend's host.
 	backendReq.Host = backendURL.Host
 
 	// Send the request to the backend.
@@ -142,24 +141,21 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig) 
 	if err != nil {
 		log.Printf("Failed to get response from backend: %v", err)
 		sendErrorResponse(conn, http.StatusBadGateway)
-		return
+		return http.StatusBadGateway
 	}
 	defer backendResp.Body.Close()
 
-	// --- Write the backend's response back to the original client ---
-	// Write the status line from the backend response.
+	// Write the backend's response back to the original client.
 	conn.Write([]byte(fmt.Sprintf("%s %s\r\n", backendResp.Proto, backendResp.Status)))
 
-	// Write headers from the backend response.
 	for key, values := range backendResp.Header {
 		for _, value := range values {
 			conn.Write([]byte(fmt.Sprintf("%s: %s\r\n", key, value)))
 		}
 	}
 
-	// Write the blank line separator.
 	conn.Write([]byte("\r\n"))
-
-	// Stream the backend's response body to the client.
 	io.Copy(conn, backendResp.Body)
+
+	return backendResp.StatusCode
 }

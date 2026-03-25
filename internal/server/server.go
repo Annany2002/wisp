@@ -153,18 +153,25 @@ func (s *Server) handleConnection(conn net.Conn) {
 	// Use the router to find the correct location for this request.
 	location := s.routeRequest(&req)
 
-	// Dispatch to handlers
+	start := time.Now()
+	var statusCode int
+
+	// Dispatch to handlers.
 	if location == nil {
-		sendErrorResponse(conn, 404)
-		return
-	}
-	if location.Root != "" {
-		serveStaticFile(conn, &req, location)
+		statusCode = 404
+		sendErrorResponse(conn, statusCode)
+	} else if location.Root != "" {
+		statusCode = serveStaticFile(conn, &req, location)
 	} else if location.ProxyPass != "" {
-		serveReverseProxy(conn, &req, location)
+		statusCode = serveReverseProxy(conn, &req, location)
 	} else {
-		sendErrorResponse(conn, 500)
+		statusCode = 500
+		sendErrorResponse(conn, statusCode)
 	}
+
+	// Access log: client_ip method uri status duration
+	log.Printf("%s %s %s %d %s",
+		conn.RemoteAddr(), req.Method, req.URI, statusCode, time.Since(start))
 }
 
 // routeRequest finds the best location configuration for a given request.
