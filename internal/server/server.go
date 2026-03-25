@@ -21,7 +21,8 @@ const (
 
 // Server represents the Wisp server instance.
 type Server struct {
-	config *config.ServerConfig
+	config   *config.ServerConfig
+	listener net.Listener
 }
 
 // Request holds parsed HTTP request data.
@@ -37,43 +38,55 @@ func New(cfg *config.ServerConfig) *Server {
 	return &Server{config: cfg}
 }
 
-// Start runs the main listener loop, now with TLS capability.
+// Start runs the main listener loop with TLS capability.
 func (s *Server) Start() error {
-	var listener net.Listener
 	var err error
 
 	address := fmt.Sprintf(":%d", s.config.Listen)
 
 	// Conditionally create either a TLS or a standard TCP listener.
 	if s.config.SSLCertificate != "" && s.config.SSLCertificateKey != "" {
-		// Load the key pair from the files specified in the config.
 		cert, err := tls.LoadX509KeyPair(s.config.SSLCertificate, s.config.SSLCertificateKey)
 		if err != nil {
 			return fmt.Errorf("failed to load TLS key pair: %w", err)
 		}
 
 		tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
-		listener, err = tls.Listen("tcp", address, tlsConfig)
+		s.listener, err = tls.Listen("tcp", address, tlsConfig)
+		if err != nil {
+			return fmt.Errorf("failed to start TLS listener on %s: %w", address, err)
+		}
 		log.Printf("Wisp secure server listening on %s", address)
 	} else {
-		listener, err = net.Listen("tcp", address)
+		s.listener, err = net.Listen("tcp", address)
+		if err != nil {
+			return fmt.Errorf("failed to start listener on %s: %w", address, err)
+		}
 		log.Printf("Wisp server listening on %s", address)
 	}
 
-	if err != nil {
-		return fmt.Errorf("failed to start listener on %s: %w", address, err)
-	}
-	defer listener.Close()
-
 	for {
-		conn, err := listener.Accept()
+		conn, err := s.listener.Accept()
 		if err != nil {
+			// Check if the error is due to the listener being closed (shutdown).
+			if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+				log.Println("Listener closed, shutting down accept loop")
+				return nil
+			}
 			log.Printf("Failed to accept connection: %v", err)
 			continue
 		}
-		// Pass the server instance to the handler
 		go s.handleConnection(conn)
 	}
+}
+
+// Shutdown gracefully stops the server by closing the listener.
+func (s *Server) Shutdown() error {
+	if s.listener != nil {
+		log.Println("Shutting down Wisp server...")
+		return s.listener.Close()
+	}
+	return nil
 }
 
 // handleConnection now uses the server's config field 's.config'.
