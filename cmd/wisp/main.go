@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/Annany2002/wisp/internal/config"
@@ -20,7 +21,20 @@ func main() {
 		log.Fatalf("Error loading configuration: %v", err)
 	}
 
-	srv := server.New(&cfg.Servers[0])
+	// Start all server blocks concurrently.
+	servers := make([]*server.Server, len(cfg.Servers))
+	var wg sync.WaitGroup
+
+	for i := range cfg.Servers {
+		servers[i] = server.New(&cfg.Servers[i])
+		wg.Add(1)
+		go func(srv *server.Server) {
+			defer wg.Done()
+			if err := srv.Start(); err != nil {
+				log.Printf("Server failed: %v", err)
+			}
+		}(servers[i])
+	}
 
 	// Handle OS signals for graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
@@ -28,12 +42,12 @@ func main() {
 
 	go func() {
 		<-sigCh
-		if err := srv.Shutdown(); err != nil {
-			log.Printf("Error during shutdown: %v", err)
+		for _, srv := range servers {
+			if err := srv.Shutdown(); err != nil {
+				log.Printf("Error during shutdown: %v", err)
+			}
 		}
 	}()
 
-	if err := srv.Start(); err != nil {
-		log.Fatalf("Wisp server failed: %v", err)
-	}
+	wg.Wait()
 }
