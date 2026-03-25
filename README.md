@@ -6,6 +6,7 @@ A minimalist web server and reverse proxy written in Go. Inspired by Nginx's arc
 
 - **Static File Server**: Serve static files with MIME type detection
 - **Reverse Proxy**: Route requests to backend services with full body forwarding
+- **Load Balancing**: Upstream groups with round-robin and least-connections algorithms, weighted backends, and automatic health checks
 - **Gzip Compression**: Automatic compression for text-based responses (HTML, CSS, JS, JSON, SVG, XML)
 - **TLS Support**: HTTPS with custom certificates
 - **Nginx-style Config**: Familiar configuration syntax with multiple server blocks
@@ -90,6 +91,33 @@ server {
 }
 ```
 
+### Load Balancing
+
+Define upstream groups to distribute requests across multiple backends:
+
+```nginx
+upstream api_servers {
+    method round_robin;    # or least_conn
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3002;
+    server 127.0.0.1:3003 weight=3;
+}
+
+server {
+    listen 8080;
+
+    location /api/ {
+        proxy_pass http://api_servers;
+    }
+}
+```
+
+**Algorithms:**
+- `round_robin` (default) — distributes requests evenly, respecting weights
+- `least_conn` — sends to the backend with the fewest active connections, weighted
+
+**Health checks:** Backends are probed via TCP every 10 seconds. Failed backends are automatically removed from rotation and restored when they recover.
+
 ### HTTPS Setup
 
 ```nginx
@@ -140,4 +168,6 @@ go test ./...
 | `ssl_certificate`     | server   | SSL certificate path   | `ssl_certificate ./cert.pem;`       |
 | `ssl_certificate_key` | server   | SSL key path           | `ssl_certificate_key ./key.pem;`    |
 | `root`                | location | Static files directory | `root /var/www/site;`               |
-| `proxy_pass`          | location | Backend service URL    | `proxy_pass http://localhost:3000;` |
+| `proxy_pass`          | location | Backend or upstream URL| `proxy_pass http://localhost:3000;` |
+| `method`              | upstream | Load balancing method  | `method least_conn;`                |
+| `server`              | upstream | Backend address        | `server 127.0.0.1:3001 weight=3;`  |
