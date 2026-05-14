@@ -181,9 +181,64 @@ func resolveBackendURL(proxyPass string, upstreams map[string]*upstream.Upstream
 	return parsed, nil, nil
 }
 
+// hopByHopHeaders are stripped from forwarded requests per RFC 7230 §6.1.
+// "Upgrade" is preserved here only because the proxy itself does not yet support
+// WebSocket; once it does, this list should be applied verbatim.
+var hopByHopHeaders = map[string]struct{}{
+	"Connection":          {},
+	"Keep-Alive":          {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Authorization": {},
+	"Te":                  {},
+	"Trailer":             {},
+	"Transfer-Encoding":   {},
+	"Upgrade":             {},
+}
+
+// proxyContext holds values used to expand nginx-style variables in
+// proxy_set_header directives.
+type proxyContext struct {
+	clientIP   string
+	scheme     string
+	host       string
+	xForwarded string // existing X-Forwarded-For chain (comma list)
+}
+
+// expandProxyVar replaces a single $var reference with its value, or returns
+// the literal text if unknown.
+func expandProxyVar(v string, ctx *proxyContext) string {
+	if !strings.Contains(v, "$") {
+		return v
+	}
+	replacer := strings.NewReplacer(
+		"$remote_addr", ctx.clientIP,
+		"$scheme", ctx.scheme,
+		"$host", ctx.host,
+		"$proxy_add_x_forwarded_for", appendForwardedFor(ctx.xForwarded, ctx.clientIP),
+	)
+	return replacer.Replace(v)
+}
+
+// appendForwardedFor appends clientIP to an existing comma-separated chain.
+func appendForwardedFor(existing, clientIP string) string {
+	if existing == "" {
+		return clientIP
+	}
+	return existing + ", " + clientIP
+}
+
+// clientIPFromConn extracts the IP portion of conn.RemoteAddr() with no port.
+func clientIPFromConn(conn net.Conn) string {
+	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+	if err != nil {
+		return conn.RemoteAddr().String()
+	}
+	return host
+}
+
 // serveReverseProxy forwards a request to a backend service.
 // Returns the HTTP status code sent to the client.
-func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, upstreams map[string]*upstream.Upstream) int {
+func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, upstreams map[string]*upstream.Upstream, scheme string) int {
 	backendURL, backend, err := resolveBackendURL(loc.ProxyPass, upstreams)
 	if err != nil {
 		log.Printf("Backend resolution failed: %v", err)
@@ -211,11 +266,52 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, 
 		return http.StatusInternalServerError
 	}
 
-	// Copy headers from the original request to the new backend request.
+	clientIP := clientIPFromConn(conn)
+	originHost := req.Headers["Host"]
+
+	// Copy headers from the original request, skipping hop-by-hop.
 	for key, value := range req.Headers {
+		if _, hop := hopByHopHeaders[http.CanonicalHeaderKey(key)]; hop {
+			continue
+		}
+		if strings.EqualFold(key, "Host") {
+			continue // set via backendReq.Host below
+		}
 		backendReq.Header.Set(key, value)
 	}
-	backendReq.Host = backendURL.Host
+
+	// Default forwarded headers — overridable by user proxy_set_header.
+	existingXFF := req.Headers["X-Forwarded-For"]
+	backendReq.Header.Set("X-Forwarded-For", appendForwardedFor(existingXFF, clientIP))
+	backendReq.Header.Set("X-Real-IP", clientIP)
+	backendReq.Header.Set("X-Forwarded-Proto", scheme)
+	if originHost != "" {
+		backendReq.Header.Set("X-Forwarded-Host", originHost)
+	}
+
+	// Apply user-defined proxy_set_header (highest priority, overrides defaults).
+	ctx := &proxyContext{
+		clientIP:   clientIP,
+		scheme:     scheme,
+		host:       originHost,
+		xForwarded: existingXFF,
+	}
+	for _, h := range loc.ProxySetHeaders {
+		expanded := expandProxyVar(h.Value, ctx)
+		if strings.EqualFold(h.Name, "Host") {
+			backendReq.Host = expanded
+			continue
+		}
+		if expanded == "" {
+			backendReq.Header.Del(h.Name)
+		} else {
+			backendReq.Header.Set(h.Name, expanded)
+		}
+	}
+
+	if backendReq.Host == "" {
+		backendReq.Host = backendURL.Host
+	}
 
 	// Send the request to the backend.
 	backendResp, err := http.DefaultClient.Do(backendReq)
@@ -230,10 +326,12 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, 
 	}
 	defer backendResp.Body.Close()
 
-	// Write the backend's response back to the original client.
+	// Write the backend's response back, dropping hop-by-hop headers.
 	conn.Write([]byte(fmt.Sprintf("%s %s\r\n", backendResp.Proto, backendResp.Status)))
-
 	for key, values := range backendResp.Header {
+		if _, hop := hopByHopHeaders[http.CanonicalHeaderKey(key)]; hop {
+			continue
+		}
 		for _, value := range values {
 			conn.Write([]byte(fmt.Sprintf("%s: %s\r\n", key, value)))
 		}

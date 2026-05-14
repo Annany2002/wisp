@@ -218,6 +218,110 @@ func TestLoadBalancingRoundRobin(t *testing.T) {
 	}
 }
 
+func TestProxyHeaders(t *testing.T) {
+	var captured http.Header
+	var capturedHost string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		capturedHost = r.Host
+		fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	testPort := 8993
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{
+				Path:      "/",
+				ProxyPass: backend.URL,
+				ProxySetHeaders: []config.ProxyHeader{
+					{Name: "Host", Value: "$host"},
+					{Name: "X-Custom", Value: "wisp-$scheme"},
+					{Name: "X-Real-IP", Value: "$remote_addr"},
+					{Name: "X-Forwarded-For", Value: "$proxy_add_x_forwarded_for"},
+				},
+			},
+		},
+	}
+	srv := New(cfg, nil)
+	go srv.Start()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	req, _ := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/", testPort), nil)
+	req.Host = "client.example.com"
+	req.Header.Set("X-Forwarded-For", "10.0.0.1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if capturedHost != "client.example.com" {
+		t.Errorf("Host: expected client.example.com, got %q", capturedHost)
+	}
+	if captured.Get("X-Custom") != "wisp-http" {
+		t.Errorf("X-Custom: expected wisp-http, got %q", captured.Get("X-Custom"))
+	}
+	if captured.Get("X-Forwarded-Proto") != "http" {
+		t.Errorf("X-Forwarded-Proto: expected http, got %q", captured.Get("X-Forwarded-Proto"))
+	}
+	if captured.Get("X-Forwarded-Host") != "client.example.com" {
+		t.Errorf("X-Forwarded-Host: expected client.example.com, got %q", captured.Get("X-Forwarded-Host"))
+	}
+	xff := captured.Get("X-Forwarded-For")
+	if !strings.HasPrefix(xff, "10.0.0.1, ") {
+		t.Errorf("X-Forwarded-For: expected chain starting with 10.0.0.1, got %q", xff)
+	}
+	realIP := captured.Get("X-Real-IP")
+	if realIP == "" || realIP == "10.0.0.1" {
+		t.Errorf("X-Real-IP: expected client conn IP, got %q", realIP)
+	}
+}
+
+func TestProxyStripsHopByHop(t *testing.T) {
+	var captured http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.Header().Set("Connection", "close")
+		w.Header().Set("Keep-Alive", "timeout=5")
+		fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	testPort := 8994
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{Path: "/", ProxyPass: backend.URL},
+		},
+	}
+	srv := New(cfg, nil)
+	go srv.Start()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	req, _ := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/", testPort), nil)
+	req.Header.Set("Proxy-Authorization", "Bearer leak")
+	req.Header.Set("X-Keep", "yes")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if captured.Get("Proxy-Authorization") != "" {
+		t.Error("Proxy-Authorization should be stripped from forwarded request")
+	}
+	if captured.Get("X-Keep") != "yes" {
+		t.Error("non-hop-by-hop header X-Keep should be forwarded")
+	}
+	if resp.Header.Get("Keep-Alive") != "" {
+		t.Error("Keep-Alive should be stripped from response")
+	}
+}
+
 func TestLoadBalancingFailover(t *testing.T) {
 	// Create 2 backends. Second one will be marked down.
 	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
