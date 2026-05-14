@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Annany2002/wisp/internal/config"
 )
@@ -266,6 +267,95 @@ server {
 		if got.Name != w.name || got.Value != w.value {
 			t.Errorf("entry %d: expected (%s=%s), got (%s=%s)", i, w.name, w.value, got.Name, got.Value)
 		}
+	}
+}
+
+func TestParseHealthCheck(t *testing.T) {
+	configContent := `
+upstream backend {
+    server 127.0.0.1:3001;
+    health_check path=/healthz interval=5s timeout=1500ms expect=204;
+}
+
+server {
+    listen 8080;
+    location / {
+        proxy_pass http://backend;
+    }
+}
+`
+	tempDir := t.TempDir()
+	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
+	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
+
+	cfg, err := config.Parse(tempConfigFile)
+	if err != nil {
+		t.Fatalf("Parse() returned unexpected error: %v", err)
+	}
+
+	hc := cfg.Upstreams[0].HealthCheck
+	if hc == nil {
+		t.Fatal("expected HealthCheck to be set")
+	}
+	if hc.Path != "/healthz" {
+		t.Errorf("Path: expected /healthz, got %q", hc.Path)
+	}
+	if hc.Interval != 5*time.Second {
+		t.Errorf("Interval: expected 5s, got %s", hc.Interval)
+	}
+	if hc.Timeout != 1500*time.Millisecond {
+		t.Errorf("Timeout: expected 1.5s, got %s", hc.Timeout)
+	}
+	if hc.Expect != 204 {
+		t.Errorf("Expect: expected 204, got %d", hc.Expect)
+	}
+}
+
+func TestParseHealthCheckDefaults(t *testing.T) {
+	configContent := `
+upstream backend {
+    server 127.0.0.1:3001;
+    health_check path=/ping;
+}
+
+server {
+    listen 8080;
+    location / { proxy_pass http://backend; }
+}
+`
+	tempDir := t.TempDir()
+	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
+	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
+
+	cfg, err := config.Parse(tempConfigFile)
+	if err != nil {
+		t.Fatalf("Parse() returned unexpected error: %v", err)
+	}
+
+	hc := cfg.Upstreams[0].HealthCheck
+	if hc.Interval != 10*time.Second || hc.Timeout != 3*time.Second || hc.Expect != 200 {
+		t.Errorf("defaults wrong: %+v", *hc)
+	}
+}
+
+func TestParseHealthCheckUnknownKey(t *testing.T) {
+	configContent := `
+upstream backend {
+    server 127.0.0.1:3001;
+    health_check pat=/typo;
+}
+
+server {
+    listen 8080;
+    location / { proxy_pass http://backend; }
+}
+`
+	tempDir := t.TempDir()
+	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
+	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
+
+	if _, err := config.Parse(tempConfigFile); err == nil {
+		t.Error("expected error for unknown health_check key, got nil")
 	}
 }
 
