@@ -169,21 +169,32 @@ func (s *Server) handleConnection(conn net.Conn) {
 		location := s.routeRequest(&req)
 		start := time.Now()
 		var statusCode int
+		hijacked := false
 
-		if location == nil {
+		switch {
+		case location == nil:
 			statusCode = 404
 			sendErrorResponse(conn, statusCode)
-		} else if location.Root != "" {
+		case location.Root != "":
 			statusCode = serveStaticFile(conn, &req, location)
-		} else if location.ProxyPass != "" {
+		case location.ProxyPass != "" && isWebSocketUpgrade(&req):
+			statusCode = serveWebSocketProxy(conn, reader, &req, location, s.upstreams, s.scheme())
+			hijacked = true
+		case location.ProxyPass != "":
 			statusCode = serveReverseProxy(conn, &req, location, s.upstreams, s.scheme())
-		} else {
+		default:
 			statusCode = 500
 			sendErrorResponse(conn, statusCode)
 		}
 
 		log.Printf("%s %s %s %d %s",
 			conn.RemoteAddr(), req.Method, req.URI, statusCode, time.Since(start))
+
+		// A successful WebSocket upgrade owns the connection. The keep-alive
+		// loop must not read more HTTP requests from it.
+		if hijacked {
+			return
+		}
 
 		// Drain any unread request body before the next request.
 		if req.Body != nil {

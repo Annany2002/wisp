@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -182,8 +184,8 @@ func resolveBackendURL(proxyPass string, upstreams map[string]*upstream.Upstream
 }
 
 // hopByHopHeaders are stripped from forwarded requests per RFC 7230 §6.1.
-// "Upgrade" is preserved here only because the proxy itself does not yet support
-// WebSocket; once it does, this list should be applied verbatim.
+// The WebSocket proxy path forwards Connection and Upgrade explicitly before
+// consulting this map; all other proxy paths apply it verbatim.
 var hopByHopHeaders = map[string]struct{}{
 	"Connection":          {},
 	"Keep-Alive":          {},
@@ -341,6 +343,170 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, 
 	io.Copy(conn, backendResp.Body)
 
 	return backendResp.StatusCode
+}
+
+// isWebSocketUpgrade returns true when the request asks for an HTTP/1.1
+// protocol upgrade to WebSocket.
+func isWebSocketUpgrade(req *Request) bool {
+	conn := strings.ToLower(req.Headers["Connection"])
+	upg := strings.ToLower(req.Headers["Upgrade"])
+	return strings.Contains(conn, "upgrade") && upg == "websocket"
+}
+
+// serveWebSocketProxy upgrades the client connection and pipes bytes
+// bidirectionally between the client and the selected backend.
+// The caller must not touch clientConn or clientReader after this returns —
+// the WebSocket frame stream has hijacked the connection.
+func serveWebSocketProxy(clientConn net.Conn, clientReader *bufio.Reader, req *Request, loc *config.LocationConfig, upstreams map[string]*upstream.Upstream, scheme string) int {
+	backendURL, backend, err := resolveBackendURL(loc.ProxyPass, upstreams)
+	if err != nil {
+		log.Printf("WS backend resolution failed: %v", err)
+		sendErrorResponse(clientConn, http.StatusBadGateway)
+		return http.StatusBadGateway
+	}
+
+	if backend != nil {
+		backend.ActiveConns.Add(1)
+		defer backend.ActiveConns.Add(-1)
+	}
+
+	backendConn, err := net.DialTimeout("tcp", backendURL.Host, 10*time.Second)
+	if err != nil {
+		log.Printf("WS backend dial failed %s: %v", backendURL.Host, err)
+		if backend != nil {
+			backend.Alive.Store(false)
+		}
+		sendErrorResponse(clientConn, http.StatusBadGateway)
+		return http.StatusBadGateway
+	}
+	defer backendConn.Close()
+
+	// Strip the location prefix from the URI before forwarding.
+	newURI := strings.TrimPrefix(req.URI, loc.Path)
+	if !strings.HasPrefix(newURI, "/") {
+		newURI = "/" + newURI
+	}
+
+	// Reconstruct the request line + headers for the backend.
+	// Connection and Upgrade headers must be forwarded verbatim; the rest of
+	// the hop-by-hop list is stripped as usual.
+	clientIP := clientIPFromConn(clientConn)
+	originHost := req.Headers["Host"]
+
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "%s %s %s\r\n", req.Method, newURI, req.Version)
+	write := func(name, value string) {
+		fmt.Fprintf(&buf, "%s: %s\r\n", name, value)
+	}
+
+	for k, v := range req.Headers {
+		ck := http.CanonicalHeaderKey(k)
+		if ck == "Host" {
+			continue // emitted below
+		}
+		if ck == "Connection" || ck == "Upgrade" {
+			write(ck, v)
+			continue
+		}
+		if _, hop := hopByHopHeaders[ck]; hop {
+			continue
+		}
+		write(ck, v)
+	}
+	if originHost != "" {
+		write("Host", originHost)
+	} else {
+		write("Host", backendURL.Host)
+	}
+
+	existingXFF := req.Headers["X-Forwarded-For"]
+	write("X-Forwarded-For", appendForwardedFor(existingXFF, clientIP))
+	write("X-Real-IP", clientIP)
+	write("X-Forwarded-Proto", scheme)
+	if originHost != "" {
+		write("X-Forwarded-Host", originHost)
+	}
+	buf.WriteString("\r\n")
+
+	if _, err := backendConn.Write([]byte(buf.String())); err != nil {
+		log.Printf("WS handshake write to backend failed: %v", err)
+		return http.StatusBadGateway
+	}
+
+	// Read the backend's response status line + headers, forward verbatim.
+	backendReader := bufio.NewReader(backendConn)
+	statusLine, err := backendReader.ReadString('\n')
+	if err != nil {
+		log.Printf("WS backend status read failed: %v", err)
+		sendErrorResponse(clientConn, http.StatusBadGateway)
+		return http.StatusBadGateway
+	}
+
+	status := http.StatusBadGateway
+	if parts := strings.SplitN(strings.TrimSpace(statusLine), " ", 3); len(parts) >= 2 {
+		if code, perr := strconv.Atoi(parts[1]); perr == nil {
+			status = code
+		}
+	}
+
+	if _, err := clientConn.Write([]byte(statusLine)); err != nil {
+		return status
+	}
+	for {
+		line, err := backendReader.ReadString('\n')
+		if err != nil {
+			return status
+		}
+		if _, err := clientConn.Write([]byte(line)); err != nil {
+			return status
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	// Non-101 responses: backend declined the upgrade. Surface the status
+	// to the access log but don't splice; the connection will close.
+	if status != http.StatusSwitchingProtocols {
+		return status
+	}
+
+	// 101 Switching Protocols — splice bidirectionally with no deadlines.
+	// Any bytes already buffered in either reader must be flushed first or
+	// the first WS frame may be lost.
+	_ = clientConn.SetReadDeadline(time.Time{})
+	_ = clientConn.SetWriteDeadline(time.Time{})
+
+	errCh := make(chan error, 2)
+	go func() {
+		if n := clientReader.Buffered(); n > 0 {
+			if pre, perr := clientReader.Peek(n); perr == nil {
+				if _, werr := backendConn.Write(pre); werr != nil {
+					errCh <- werr
+					return
+				}
+				_, _ = clientReader.Discard(n)
+			}
+		}
+		_, err := io.Copy(backendConn, clientConn)
+		errCh <- err
+	}()
+	go func() {
+		if n := backendReader.Buffered(); n > 0 {
+			if pre, perr := backendReader.Peek(n); perr == nil {
+				if _, werr := clientConn.Write(pre); werr != nil {
+					errCh <- werr
+					return
+				}
+				_, _ = backendReader.Discard(n)
+			}
+		}
+		_, err := io.Copy(clientConn, backendConn)
+		errCh <- err
+	}()
+
+	<-errCh
+	return status
 }
 
 // chunkedWriter implements io.WriteCloser for HTTP chunked transfer encoding.
