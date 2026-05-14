@@ -18,9 +18,10 @@ type Backend struct {
 
 // Upstream is a group of backends with a load balancing strategy.
 type Upstream struct {
-	Name     string
-	Method   string
-	Backends []*Backend
+	Name        string
+	Method      string
+	Backends    []*Backend
+	HealthCheck *config.HealthCheckConfig
 
 	// Round-robin state.
 	mu      sync.Mutex
@@ -30,9 +31,10 @@ type Upstream struct {
 // New creates an Upstream from a parsed config.
 func New(cfg *config.UpstreamConfig) *Upstream {
 	u := &Upstream{
-		Name:     cfg.Name,
-		Method:   cfg.Method,
-		Backends: make([]*Backend, len(cfg.Backends)),
+		Name:        cfg.Name,
+		Method:      cfg.Method,
+		Backends:    make([]*Backend, len(cfg.Backends)),
+		HealthCheck: cfg.HealthCheck,
 	}
 	for i, b := range cfg.Backends {
 		be := &Backend{
