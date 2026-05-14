@@ -29,10 +29,10 @@ type ProxyHeader struct {
 
 // LocationConfig holds directives for a 'location' block.
 type LocationConfig struct {
-	Path             string
-	Root             string
-	ProxyPass        string
-	ProxySetHeaders  []ProxyHeader
+	Path            string
+	Root            string
+	ProxyPass       string
+	ProxySetHeaders []ProxyHeader
 }
 
 // ServerConfig holds directives for a 'server' block.

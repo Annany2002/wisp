@@ -203,9 +203,9 @@ func TestLoadBalancingRoundRobin(t *testing.T) {
 	}
 
 	// Verify each backend was hit exactly twice.
-	for i, count := range hitCount {
-		if count.Load() != 2 {
-			t.Errorf("backend-%d: expected 2 hits, got %d", i, count.Load())
+	for i := range hitCount {
+		if got := hitCount[i].Load(); got != 2 {
+			t.Errorf("backend-%d: expected 2 hits, got %d", i, got)
 		}
 	}
 
