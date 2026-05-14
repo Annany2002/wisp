@@ -132,7 +132,7 @@ func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) in
 		gz := gzip.NewWriter(cw)
 		io.Copy(gz, file)
 		gz.Close()
-		cw.Close()
+		_ = cw.Close()
 	} else {
 		responseHeaders := fmt.Sprintf(
 			"HTTP/1.1 200 OK\r\n"+

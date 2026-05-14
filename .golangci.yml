@@ -19,8 +19,30 @@ linters-settings:
     simplify: true
   goimports:
     local-prefixes: github.com/Annany2002/wisp
+  errcheck:
+    # Connection writes / deadline sets / deferred Close are common patterns
+    # where a returned error cannot be meaningfully handled by the caller in
+    # this codebase. Whitelist them rather than silencing call sites.
+    exclude-functions:
+      - fmt.Fprint
+      - fmt.Fprintf
+      - fmt.Fprintln
+      - io.Copy
+      - (net.Conn).Close
+      - (net.Conn).Write
+      - (net.Conn).SetReadDeadline
+      - (net.Conn).SetWriteDeadline
+      - (*os.File).Close
+      - (io.Closer).Close
+      - (*compress/gzip.Writer).Close
 
 issues:
   exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
+  exclude-rules:
+    # Tests intentionally ignore errors from fixture setup and resp.Body.Close
+    # because failures there mask the actual assertion.
+    - path: _test\.go
+      linters:
+        - errcheck
