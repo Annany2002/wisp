@@ -21,11 +21,18 @@ type UpstreamConfig struct {
 	Backends []UpstreamBackend
 }
 
+// ProxyHeader is a single proxy_set_header directive (preserves order).
+type ProxyHeader struct {
+	Name  string
+	Value string
+}
+
 // LocationConfig holds directives for a 'location' block.
 type LocationConfig struct {
-	Path      string
-	Root      string
-	ProxyPass string
+	Path             string
+	Root             string
+	ProxyPass        string
+	ProxySetHeaders  []ProxyHeader
 }
 
 // ServerConfig holds directives for a 'server' block.
@@ -165,6 +172,17 @@ func Parse(filePath string) (*Config, error) {
 				currentLoc.Root = value
 			case "proxy_pass":
 				currentLoc.ProxyPass = value
+			case "proxy_set_header":
+				// proxy_set_header <Name> <value...>;
+				if len(parts) < 3 {
+					return nil, fmt.Errorf("proxy_set_header requires name and value")
+				}
+				rest := strings.TrimSuffix(strings.Join(parts[2:], " "), ";")
+				rest = strings.TrimSpace(rest)
+				currentLoc.ProxySetHeaders = append(currentLoc.ProxySetHeaders, ProxyHeader{
+					Name:  parts[1],
+					Value: rest,
+				})
 			}
 			continue
 		}
