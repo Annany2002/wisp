@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // UpstreamBackend represents a single backend server in an upstream group.
@@ -14,11 +15,22 @@ type UpstreamBackend struct {
 	Weight  int
 }
 
+// HealthCheckConfig holds parsed values for an 'health_check' directive.
+// A non-nil HealthCheck on an UpstreamConfig signals HTTP-based probing;
+// the absence of a Path keeps the legacy TCP-dial probe.
+type HealthCheckConfig struct {
+	Path     string        // HTTP path to GET; empty = TCP-dial mode
+	Interval time.Duration // tick interval; defaults to 10s
+	Timeout  time.Duration // per-probe timeout; defaults to 3s
+	Expect   int           // expected status code; defaults to 200
+}
+
 // UpstreamConfig holds directives for an 'upstream' block.
 type UpstreamConfig struct {
-	Name     string
-	Method   string // "round_robin" (default) or "least_conn"
-	Backends []UpstreamBackend
+	Name        string
+	Method      string // "round_robin" (default) or "least_conn"
+	Backends    []UpstreamBackend
+	HealthCheck *HealthCheckConfig
 }
 
 // ProxyHeader is a single proxy_set_header directive (preserves order).
@@ -148,6 +160,13 @@ func Parse(filePath string) (*Config, error) {
 					return nil, fmt.Errorf("unknown upstream method: %s", value)
 				}
 				currentUpstream.Method = value
+			case "health_check":
+				hc, err := parseHealthCheck(parts[1:])
+				if err != nil {
+					return nil, fmt.Errorf("health_check: %w", err)
+				}
+				currentUpstream.HealthCheck = hc
+				continue
 			case "server":
 				backend := UpstreamBackend{Address: value, Weight: 1}
 				// Parse optional weight: server 127.0.0.1:3001 weight=3;
@@ -211,4 +230,53 @@ func Parse(filePath string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// parseHealthCheck parses the key=value tokens of a 'health_check' directive
+// and returns a populated HealthCheckConfig. Unknown keys are an error so
+// typos in the config file fail loudly instead of being silently ignored.
+//
+// Example: health_check path=/healthz interval=10s timeout=3s expect=200;
+func parseHealthCheck(tokens []string) (*HealthCheckConfig, error) {
+	hc := &HealthCheckConfig{
+		Interval: 10 * time.Second,
+		Timeout:  3 * time.Second,
+		Expect:   200,
+	}
+	for _, raw := range tokens {
+		t := strings.Trim(raw, ";")
+		if t == "" {
+			continue
+		}
+		kv := strings.SplitN(t, "=", 2)
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("expected key=value, got %q", t)
+		}
+		key, val := kv[0], kv[1]
+		switch key {
+		case "path":
+			hc.Path = val
+		case "interval":
+			d, err := time.ParseDuration(val)
+			if err != nil {
+				return nil, fmt.Errorf("invalid interval %q: %w", val, err)
+			}
+			hc.Interval = d
+		case "timeout":
+			d, err := time.ParseDuration(val)
+			if err != nil {
+				return nil, fmt.Errorf("invalid timeout %q: %w", val, err)
+			}
+			hc.Timeout = d
+		case "expect":
+			code, err := strconv.Atoi(val)
+			if err != nil || code < 100 || code > 599 {
+				return nil, fmt.Errorf("invalid expect %q: must be HTTP status code", val)
+			}
+			hc.Expect = code
+		default:
+			return nil, fmt.Errorf("unknown key %q", key)
+		}
+	}
+	return hc, nil
 }
