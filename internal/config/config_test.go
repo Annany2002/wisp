@@ -226,6 +226,47 @@ server {
 	}
 }
 
+func TestParseProxySetHeader(t *testing.T) {
+	configContent := `
+server {
+    listen 8080;
+    location /api/ {
+        proxy_pass http://backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Custom wisp value;
+    }
+}
+`
+	tempDir := t.TempDir()
+	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
+	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
+
+	cfg, err := Parse(tempConfigFile)
+	if err != nil {
+		t.Fatalf("Parse() returned an unexpected error: %v", err)
+	}
+
+	loc := cfg.Servers[0].Locations[0]
+	if len(loc.ProxySetHeaders) != 4 {
+		t.Fatalf("expected 4 proxy_set_header entries, got %d", len(loc.ProxySetHeaders))
+	}
+
+	want := []struct{ name, value string }{
+		{"Host", "$host"},
+		{"X-Real-IP", "$remote_addr"},
+		{"X-Forwarded-For", "$proxy_add_x_forwarded_for"},
+		{"X-Custom", "wisp value"},
+	}
+	for i, w := range want {
+		got := loc.ProxySetHeaders[i]
+		if got.Name != w.name || got.Value != w.value {
+			t.Errorf("entry %d: expected (%s=%s), got (%s=%s)", i, w.name, w.value, got.Name, got.Value)
+		}
+	}
+}
+
 func TestParseLocationOutsideServer(t *testing.T) {
 	configContent := `
 location / {

@@ -87,6 +87,14 @@ func (s *Server) Start() error {
 	}
 }
 
+// scheme returns "https" when TLS is configured, else "http".
+func (s *Server) scheme() string {
+	if s.config.SSLCertificate != "" && s.config.SSLCertificateKey != "" {
+		return "https"
+	}
+	return "http"
+}
+
 // Shutdown gracefully stops the server by closing the listener.
 func (s *Server) Shutdown() error {
 	if s.listener != nil {
@@ -168,7 +176,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		} else if location.Root != "" {
 			statusCode = serveStaticFile(conn, &req, location)
 		} else if location.ProxyPass != "" {
-			statusCode = serveReverseProxy(conn, &req, location, s.upstreams)
+			statusCode = serveReverseProxy(conn, &req, location, s.upstreams, s.scheme())
 		} else {
 			statusCode = 500
 			sendErrorResponse(conn, statusCode)
