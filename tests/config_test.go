@@ -1,9 +1,11 @@
-package config
+package tests
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Annany2002/wisp/internal/config"
 )
 
 func TestParseConfig(t *testing.T) {
@@ -28,7 +30,7 @@ server {
 		t.Fatalf("Failed to write temporary config file: %v", err)
 	}
 
-	cfg, err := Parse(tempConfigFile)
+	cfg, err := config.Parse(tempConfigFile)
 	if err != nil {
 		t.Fatalf("Parse() returned an unexpected error: %v", err)
 	}
@@ -87,7 +89,7 @@ server {
 	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
 	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
 
-	cfg, err := Parse(tempConfigFile)
+	cfg, err := config.Parse(tempConfigFile)
 	if err != nil {
 		t.Fatalf("Parse() returned an unexpected error: %v", err)
 	}
@@ -115,7 +117,7 @@ func TestParseNoServerBlock(t *testing.T) {
 	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
 	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
 
-	_, err := Parse(tempConfigFile)
+	_, err := config.Parse(tempConfigFile)
 	if err == nil {
 		t.Error("expected error for config with no server blocks, got nil")
 	}
@@ -142,7 +144,7 @@ server {
 	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
 	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
 
-	cfg, err := Parse(tempConfigFile)
+	cfg, err := config.Parse(tempConfigFile)
 	if err != nil {
 		t.Fatalf("Parse() returned an unexpected error: %v", err)
 	}
@@ -192,7 +194,7 @@ server {
 	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
 	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
 
-	cfg, err := Parse(tempConfigFile)
+	cfg, err := config.Parse(tempConfigFile)
 	if err != nil {
 		t.Fatalf("Parse() returned an unexpected error: %v", err)
 	}
@@ -220,7 +222,7 @@ server {
 	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
 	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
 
-	_, err := Parse(tempConfigFile)
+	_, err := config.Parse(tempConfigFile)
 	if err == nil {
 		t.Error("expected error for invalid upstream method, got nil")
 	}
@@ -243,7 +245,7 @@ server {
 	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
 	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
 
-	cfg, err := Parse(tempConfigFile)
+	cfg, err := config.Parse(tempConfigFile)
 	if err != nil {
 		t.Fatalf("Parse() returned an unexpected error: %v", err)
 	}
@@ -277,7 +279,7 @@ location / {
 	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
 	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
 
-	_, err := Parse(tempConfigFile)
+	_, err := config.Parse(tempConfigFile)
 	if err == nil {
 		t.Error("expected error for location outside server block, got nil")
 	}

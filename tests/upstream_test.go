@@ -1,9 +1,10 @@
-package upstream
+package tests
 
 import (
 	"testing"
 
 	"github.com/Annany2002/wisp/internal/config"
+	"github.com/Annany2002/wisp/internal/upstream"
 )
 
 func TestRoundRobin(t *testing.T) {
@@ -16,7 +17,7 @@ func TestRoundRobin(t *testing.T) {
 			{Address: "127.0.0.1:3003", Weight: 1},
 		},
 	}
-	u := New(cfg)
+	u := upstream.New(cfg)
 
 	// Should cycle through backends in order.
 	addrs := make([]string, 6)
@@ -49,7 +50,7 @@ func TestRoundRobinSkipsUnhealthy(t *testing.T) {
 			{Address: "127.0.0.1:3003", Weight: 1},
 		},
 	}
-	u := New(cfg)
+	u := upstream.New(cfg)
 
 	// Mark second backend as down.
 	u.Backends[1].Alive.Store(false)
@@ -78,7 +79,7 @@ func TestAllBackendsDown(t *testing.T) {
 			{Address: "127.0.0.1:3001", Weight: 1},
 		},
 	}
-	u := New(cfg)
+	u := upstream.New(cfg)
 	u.Backends[0].Alive.Store(false)
 
 	_, err := u.Next()
@@ -97,7 +98,7 @@ func TestLeastConn(t *testing.T) {
 			{Address: "127.0.0.1:3003", Weight: 1},
 		},
 	}
-	u := New(cfg)
+	u := upstream.New(cfg)
 
 	// Simulate connections: backend 1 has 5, backend 2 has 2, backend 3 has 10.
 	u.Backends[0].ActiveConns.Store(5)
@@ -122,7 +123,7 @@ func TestLeastConnWithWeight(t *testing.T) {
 			{Address: "127.0.0.1:3002", Weight: 5}, // 10 conns / weight 5 = load 2.0
 		},
 	}
-	u := New(cfg)
+	u := upstream.New(cfg)
 
 	u.Backends[0].ActiveConns.Store(5)
 	u.Backends[1].ActiveConns.Store(10)
@@ -146,7 +147,7 @@ func TestLeastConnSkipsUnhealthy(t *testing.T) {
 			{Address: "127.0.0.1:3002", Weight: 1},
 		},
 	}
-	u := New(cfg)
+	u := upstream.New(cfg)
 
 	// Backend 1 has 0 conns but is down. Backend 2 has 5 conns but is alive.
 	u.Backends[0].ActiveConns.Store(0)

@@ -1,4 +1,4 @@
-package server
+package tests
 
 import (
 	"compress/gzip"
@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Annany2002/wisp/internal/config"
+	"github.com/Annany2002/wisp/internal/server"
 	"github.com/Annany2002/wisp/internal/upstream"
 )
 
@@ -43,7 +44,7 @@ func TestIntegration(t *testing.T) {
 			{Path: "/api/", ProxyPass: backend.URL},
 		},
 	}
-	srv := New(cfg, nil)
+	srv := server.New(cfg, nil)
 	go srv.Start()
 	time.Sleep(50 * time.Millisecond) // Give server time to start
 
@@ -184,7 +185,7 @@ func TestLoadBalancingRoundRobin(t *testing.T) {
 			{Path: "/api/", ProxyPass: "http://testbackend"},
 		},
 	}
-	srv := New(cfg, upstreams)
+	srv := server.New(cfg, upstreams)
 	go srv.Start()
 	time.Sleep(50 * time.Millisecond)
 
@@ -244,7 +245,7 @@ func TestProxyHeaders(t *testing.T) {
 			},
 		},
 	}
-	srv := New(cfg, nil)
+	srv := server.New(cfg, nil)
 	go srv.Start()
 	defer srv.Shutdown()
 	time.Sleep(50 * time.Millisecond)
@@ -297,7 +298,7 @@ func TestProxyStripsHopByHop(t *testing.T) {
 			{Path: "/", ProxyPass: backend.URL},
 		},
 	}
-	srv := New(cfg, nil)
+	srv := server.New(cfg, nil)
 	go srv.Start()
 	defer srv.Shutdown()
 	time.Sleep(50 * time.Millisecond)
@@ -359,7 +360,7 @@ func TestLoadBalancingFailover(t *testing.T) {
 			{Path: "/", ProxyPass: "http://failover"},
 		},
 	}
-	srv := New(cfg, upstreams)
+	srv := server.New(cfg, upstreams)
 	go srv.Start()
 	time.Sleep(50 * time.Millisecond)
 
