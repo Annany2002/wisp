@@ -1,9 +1,11 @@
 package tests
 
 import (
+	"bufio"
 	"compress/gzip"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -378,5 +380,183 @@ func TestLoadBalancingFailover(t *testing.T) {
 		if !strings.Contains(string(body), "alive-backend") {
 			t.Errorf("request %d: expected alive-backend, got %s", i, string(body))
 		}
+	}
+}
+
+// wsEchoBackend hijacks the connection, completes a 101 handshake, and
+// echoes any received bytes back to the client. The bytes do not have to
+// be valid WS frames — the proxy is protocol-agnostic after upgrade.
+func wsEchoBackend(t *testing.T, capturedHeaders chan<- http.Header) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if capturedHeaders != nil {
+			capturedHeaders <- r.Header.Clone()
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("backend ResponseWriter does not support Hijack")
+			return
+		}
+		conn, brw, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("backend hijack failed: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+			"Upgrade: websocket\r\n" +
+			"Connection: Upgrade\r\n" +
+			"Sec-WebSocket-Accept: dummy\r\n\r\n"
+		if _, err := brw.WriteString(resp); err != nil {
+			return
+		}
+		if err := brw.Flush(); err != nil {
+			return
+		}
+
+		// Echo loop: copy client bytes back until close.
+		buf := make([]byte, 1024)
+		for {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				if _, werr := conn.Write(buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}))
+}
+
+func TestWebSocketProxyHandshakeAndEcho(t *testing.T) {
+	headersCh := make(chan http.Header, 1)
+	backend := wsEchoBackend(t, headersCh)
+	defer backend.Close()
+
+	testPort := 8995
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{Path: "/ws/", ProxyPass: backend.URL},
+		},
+	}
+	srv := server.New(cfg, nil)
+	go srv.Start()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", testPort))
+	if err != nil {
+		t.Fatalf("dial wisp: %v", err)
+	}
+	defer conn.Close()
+
+	handshake := "GET /ws/chat HTTP/1.1\r\n" +
+		"Host: client.example.com\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+		"Sec-WebSocket-Version: 13\r\n\r\n"
+	if _, err := conn.Write([]byte(handshake)); err != nil {
+		t.Fatalf("send handshake: %v", err)
+	}
+
+	r := bufio.NewReader(conn)
+	statusLine, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if !strings.HasPrefix(statusLine, "HTTP/1.1 101") {
+		t.Fatalf("expected 101 Switching Protocols, got %q", statusLine)
+	}
+
+	// Drain remaining response headers.
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read header: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	// Backend should have received WS handshake headers and X-Forwarded-*.
+	var bh http.Header
+	select {
+	case bh = <-headersCh:
+	case <-time.After(time.Second):
+		t.Fatal("backend never received request")
+	}
+	if !strings.EqualFold(bh.Get("Upgrade"), "websocket") {
+		t.Errorf("backend Upgrade header: expected websocket, got %q", bh.Get("Upgrade"))
+	}
+	if !strings.Contains(strings.ToLower(bh.Get("Connection")), "upgrade") {
+		t.Errorf("backend Connection header: expected upgrade, got %q", bh.Get("Connection"))
+	}
+	if bh.Get("X-Forwarded-Proto") != "http" {
+		t.Errorf("X-Forwarded-Proto: expected http, got %q", bh.Get("X-Forwarded-Proto"))
+	}
+	if bh.Get("X-Real-IP") == "" {
+		t.Error("X-Real-IP not injected")
+	}
+
+	// Bidirectional splice: send bytes, expect echo.
+	if _, err := conn.Write([]byte("ping-from-client")); err != nil {
+		t.Fatalf("send ws payload: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	got := make([]byte, len("ping-from-client"))
+	if _, err := io.ReadFull(r, got); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if string(got) != "ping-from-client" {
+		t.Errorf("echo mismatch: got %q", string(got))
+	}
+}
+
+func TestWebSocketProxyBackendDeclines(t *testing.T) {
+	// Backend that rejects the upgrade with a 400.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no upgrade for you", http.StatusBadRequest)
+	}))
+	defer backend.Close()
+
+	testPort := 8996
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{Path: "/ws/", ProxyPass: backend.URL},
+		},
+	}
+	srv := server.New(cfg, nil)
+	go srv.Start()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", testPort))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	handshake := "GET /ws/x HTTP/1.1\r\n" +
+		"Host: localhost\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n\r\n"
+	if _, err := conn.Write([]byte(handshake)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	r := bufio.NewReader(conn)
+	statusLine, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.HasPrefix(statusLine, "HTTP/1.1 400") {
+		t.Fatalf("expected 400 from declined upgrade, got %q", statusLine)
 	}
 }
