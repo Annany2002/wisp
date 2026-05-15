@@ -45,6 +45,10 @@ type LocationConfig struct {
 	Root            string
 	ProxyPass       string
 	ProxySetHeaders []ProxyHeader
+	// AddHeaders is the ordered list of 'add_header' directives. They are
+	// appended to every response served from this location (static or
+	// proxied) just before the headers are flushed.
+	AddHeaders []ProxyHeader
 }
 
 // ServerConfig holds directives for a 'server' block.
@@ -199,6 +203,22 @@ func Parse(filePath string) (*Config, error) {
 				rest := strings.TrimSuffix(strings.Join(parts[2:], " "), ";")
 				rest = strings.TrimSpace(rest)
 				currentLoc.ProxySetHeaders = append(currentLoc.ProxySetHeaders, ProxyHeader{
+					Name:  parts[1],
+					Value: rest,
+				})
+			case "add_header":
+				// add_header <Name> <value...>;
+				if len(parts) < 3 {
+					return nil, fmt.Errorf("add_header requires name and value")
+				}
+				rest := strings.TrimSuffix(strings.Join(parts[2:], " "), ";")
+				rest = strings.TrimSpace(rest)
+				// Quoted values are common in nginx (e.g. CSP). Strip a
+				// single pair of surrounding double quotes if present.
+				if len(rest) >= 2 && rest[0] == '"' && rest[len(rest)-1] == '"' {
+					rest = rest[1 : len(rest)-1]
+				}
+				currentLoc.AddHeaders = append(currentLoc.AddHeaders, ProxyHeader{
 					Name:  parts[1],
 					Value: rest,
 				})

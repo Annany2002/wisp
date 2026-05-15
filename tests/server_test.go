@@ -383,6 +383,120 @@ func TestLoadBalancingFailover(t *testing.T) {
 	}
 }
 
+func TestAddHeaderOnStaticResponse(t *testing.T) {
+	staticDir := t.TempDir()
+	os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("hi"), 0644)
+
+	testPort := 9001
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{
+				Path: "/",
+				Root: staticDir,
+				AddHeaders: []config.ProxyHeader{
+					{Name: "X-Frame-Options", Value: "DENY"},
+					{Name: "Strict-Transport-Security", Value: "max-age=63072000"},
+				},
+			},
+		},
+	}
+	srv := server.New(cfg, nil)
+	go srv.Start()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/", testPort))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options: expected DENY, got %q", got)
+	}
+	if got := resp.Header.Get("Strict-Transport-Security"); got != "max-age=63072000" {
+		t.Errorf("HSTS: expected max-age=63072000, got %q", got)
+	}
+}
+
+func TestAddHeaderOnGzipResponse(t *testing.T) {
+	staticDir := t.TempDir()
+	os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("compress me"), 0644)
+
+	testPort := 9002
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{
+				Path: "/",
+				Root: staticDir,
+				AddHeaders: []config.ProxyHeader{
+					{Name: "X-Custom", Value: "gzip-path"},
+				},
+			},
+		},
+	}
+	srv := server.New(cfg, nil)
+	go srv.Start()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	req, _ := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/", testPort), nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.Header.Get("Content-Encoding") != "gzip" {
+		t.Errorf("expected gzip response, got Content-Encoding=%q", resp.Header.Get("Content-Encoding"))
+	}
+	if got := resp.Header.Get("X-Custom"); got != "gzip-path" {
+		t.Errorf("X-Custom: expected gzip-path, got %q", got)
+	}
+}
+
+func TestAddHeaderOnProxyResponse(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Backend", "yes")
+		fmt.Fprint(w, "from backend")
+	}))
+	defer backend.Close()
+
+	testPort := 9003
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{
+				Path:      "/",
+				ProxyPass: backend.URL,
+				AddHeaders: []config.ProxyHeader{
+					{Name: "X-Frame-Options", Value: "SAMEORIGIN"},
+				},
+			},
+		},
+	}
+	srv := server.New(cfg, nil)
+	go srv.Start()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/", testPort))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Errorf("X-Frame-Options: expected SAMEORIGIN, got %q", got)
+	}
+	if got := resp.Header.Get("X-Backend"); got != "yes" {
+		t.Errorf("backend header lost: expected yes, got %q", got)
+	}
+}
+
 func TestProxyRetryOnConnectionFailure(t *testing.T) {
 	var hits atomic.Int32
 	alive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

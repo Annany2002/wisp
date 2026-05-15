@@ -359,6 +359,45 @@ server {
 	}
 }
 
+func TestParseAddHeader(t *testing.T) {
+	configContent := `
+server {
+    listen 8080;
+    location / {
+        root /var/www;
+        add_header X-Frame-Options DENY;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+        add_header Content-Security-Policy "default-src 'self'";
+    }
+}
+`
+	tempDir := t.TempDir()
+	tempConfigFile := filepath.Join(tempDir, "wisp.conf")
+	os.WriteFile(tempConfigFile, []byte(configContent), 0644)
+
+	cfg, err := config.Parse(tempConfigFile)
+	if err != nil {
+		t.Fatalf("Parse() returned unexpected error: %v", err)
+	}
+
+	loc := cfg.Servers[0].Locations[0]
+	if len(loc.AddHeaders) != 3 {
+		t.Fatalf("expected 3 add_header entries, got %d", len(loc.AddHeaders))
+	}
+
+	want := []struct{ name, value string }{
+		{"X-Frame-Options", "DENY"},
+		{"Strict-Transport-Security", "max-age=31536000; includeSubDomains"},
+		{"Content-Security-Policy", "default-src 'self'"},
+	}
+	for i, w := range want {
+		got := loc.AddHeaders[i]
+		if got.Name != w.name || got.Value != w.value {
+			t.Errorf("entry %d: expected (%s=%s), got (%s=%s)", i, w.name, w.value, got.Name, got.Value)
+		}
+	}
+}
+
 func TestParseLocationOutsideServer(t *testing.T) {
 	configContent := `
 location / {
