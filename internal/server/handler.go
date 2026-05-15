@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -183,6 +184,22 @@ func resolveBackendURL(proxyPass string, upstreams map[string]*upstream.Upstream
 	return parsed, nil, nil
 }
 
+// resolveUpstreamGroup returns the upstream group named by proxyPass's host,
+// or nil if proxyPass points at a literal address. The parsed proxy_pass URL
+// is returned so the caller does not have to re-parse it.
+func resolveUpstreamGroup(proxyPass string, upstreams map[string]*upstream.Upstream) (*url.URL, *upstream.Upstream, error) {
+	parsed, err := url.Parse(proxyPass)
+	if err != nil {
+		return nil, nil, fmt.Errorf("malformed proxy_pass URL: %s", proxyPass)
+	}
+	if upstreams != nil {
+		if u, ok := upstreams[parsed.Hostname()]; ok {
+			return parsed, u, nil
+		}
+	}
+	return parsed, nil, nil
+}
+
 // hopByHopHeaders are stripped from forwarded requests per RFC 7230 §6.1.
 // The WebSocket proxy path forwards Connection and Upgrade explicitly before
 // consulting this map; all other proxy paths apply it verbatim.
@@ -238,51 +255,33 @@ func clientIPFromConn(conn net.Conn) string {
 	return host
 }
 
-// serveReverseProxy forwards a request to a backend service.
-// Returns the HTTP status code sent to the client.
-func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, upstreams map[string]*upstream.Upstream, scheme string) int {
-	backendURL, backend, err := resolveBackendURL(loc.ProxyPass, upstreams)
+// buildBackendRequest constructs an http.Request targeting backendURL+newURI
+// with headers copied from req, hop-by-hop stripped, X-Forwarded-* injected,
+// and any user-defined proxy_set_header rewrites applied. bodyBytes is the
+// fully-buffered request body (or nil); a fresh bytes.Reader is wrapped for
+// each call so retries can replay the body.
+func buildBackendRequest(req *Request, loc *config.LocationConfig, backendURL *url.URL, newURI, clientIP, scheme string, bodyBytes []byte) (*http.Request, error) {
+	var body io.Reader
+	if bodyBytes != nil {
+		body = bytes.NewReader(bodyBytes)
+	}
+	backendReq, err := http.NewRequest(req.Method, backendURL.String()+newURI, body)
 	if err != nil {
-		log.Printf("Backend resolution failed: %v", err)
-		sendErrorResponse(conn, http.StatusBadGateway)
-		return http.StatusBadGateway
+		return nil, err
 	}
 
-	// Track active connections for least_conn.
-	if backend != nil {
-		backend.ActiveConns.Add(1)
-		defer backend.ActiveConns.Add(-1)
-	}
-
-	// Strip the location path from the request URI before forwarding.
-	newURI := strings.TrimPrefix(req.URI, loc.Path)
-	if !strings.HasPrefix(newURI, "/") {
-		newURI = "/" + newURI
-	}
-
-	// Create a new request to the backend, forwarding the body if present.
-	backendReq, err := http.NewRequest(req.Method, backendURL.String()+newURI, req.Body)
-	if err != nil {
-		log.Printf("Failed to create backend request: %v", err)
-		sendErrorResponse(conn, http.StatusInternalServerError)
-		return http.StatusInternalServerError
-	}
-
-	clientIP := clientIPFromConn(conn)
 	originHost := req.Headers["Host"]
 
-	// Copy headers from the original request, skipping hop-by-hop.
 	for key, value := range req.Headers {
 		if _, hop := hopByHopHeaders[http.CanonicalHeaderKey(key)]; hop {
 			continue
 		}
 		if strings.EqualFold(key, "Host") {
-			continue // set via backendReq.Host below
+			continue
 		}
 		backendReq.Header.Set(key, value)
 	}
 
-	// Default forwarded headers — overridable by user proxy_set_header.
 	existingXFF := req.Headers["X-Forwarded-For"]
 	backendReq.Header.Set("X-Forwarded-For", appendForwardedFor(existingXFF, clientIP))
 	backendReq.Header.Set("X-Real-IP", clientIP)
@@ -291,7 +290,6 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, 
 		backendReq.Header.Set("X-Forwarded-Host", originHost)
 	}
 
-	// Apply user-defined proxy_set_header (highest priority, overrides defaults).
 	ctx := &proxyContext{
 		clientIP:   clientIP,
 		scheme:     scheme,
@@ -314,35 +312,117 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, 
 	if backendReq.Host == "" {
 		backendReq.Host = backendURL.Host
 	}
+	return backendReq, nil
+}
 
-	// Send the request to the backend.
-	backendResp, err := http.DefaultClient.Do(backendReq)
+// serveReverseProxy forwards a request to a backend service. When the
+// proxy_pass target is an upstream group, a connection-level failure on one
+// backend triggers a retry against the next backend (failing one is marked
+// dead). At most len(upstream.Backends) attempts are made; direct URLs
+// (non-upstream proxy_pass) are tried once.
+// Retries only fire on transport errors — once a backend returns *any* HTTP
+// status, that response is forwarded unmodified.
+// Returns the HTTP status code sent to the client.
+func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, upstreams map[string]*upstream.Upstream, scheme string) int {
+	parsedURL, group, err := resolveUpstreamGroup(loc.ProxyPass, upstreams)
 	if err != nil {
-		log.Printf("Failed to get response from backend %s: %v", backendURL.Host, err)
-		// Mark backend as unhealthy on connection failure.
-		if backend != nil {
-			backend.Alive.Store(false)
-		}
+		log.Printf("Backend resolution failed: %v", err)
 		sendErrorResponse(conn, http.StatusBadGateway)
 		return http.StatusBadGateway
 	}
-	defer backendResp.Body.Close()
 
-	// Write the backend's response back, dropping hop-by-hop headers.
-	conn.Write([]byte(fmt.Sprintf("%s %s\r\n", backendResp.Proto, backendResp.Status)))
-	for key, values := range backendResp.Header {
-		if _, hop := hopByHopHeaders[http.CanonicalHeaderKey(key)]; hop {
-			continue
-		}
-		for _, value := range values {
-			conn.Write([]byte(fmt.Sprintf("%s: %s\r\n", key, value)))
+	// Buffer the request body once so each retry attempt can replay it.
+	var bodyBytes []byte
+	if req.Body != nil {
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			log.Printf("Failed to buffer request body: %v", err)
+			sendErrorResponse(conn, http.StatusBadGateway)
+			return http.StatusBadGateway
 		}
 	}
 
-	conn.Write([]byte("\r\n"))
-	io.Copy(conn, backendResp.Body)
+	// Strip the location path from the request URI before forwarding.
+	newURI := strings.TrimPrefix(req.URI, loc.Path)
+	if !strings.HasPrefix(newURI, "/") {
+		newURI = "/" + newURI
+	}
 
-	return backendResp.StatusCode
+	clientIP := clientIPFromConn(conn)
+
+	maxAttempts := 1
+	if group != nil {
+		maxAttempts = len(group.Backends)
+		if maxAttempts < 1 {
+			maxAttempts = 1
+		}
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var backendURL *url.URL
+		var backend *upstream.Backend
+
+		if group != nil {
+			b, err := group.Next()
+			if err != nil {
+				lastErr = err
+				break // no healthy backends left
+			}
+			resolved := *parsedURL
+			resolved.Host = b.Address
+			backendURL = &resolved
+			backend = b
+		} else {
+			backendURL = parsedURL
+		}
+
+		backendReq, err := buildBackendRequest(req, loc, backendURL, newURI, clientIP, scheme, bodyBytes)
+		if err != nil {
+			log.Printf("Failed to create backend request: %v", err)
+			sendErrorResponse(conn, http.StatusInternalServerError)
+			return http.StatusInternalServerError
+		}
+
+		if backend != nil {
+			backend.ActiveConns.Add(1)
+		}
+		backendResp, err := http.DefaultClient.Do(backendReq)
+		if backend != nil {
+			backend.ActiveConns.Add(-1)
+		}
+
+		if err != nil {
+			log.Printf("attempt %d/%d: backend %s failed: %v", attempt, maxAttempts, backendURL.Host, err)
+			lastErr = err
+			if backend != nil {
+				backend.Alive.Store(false)
+				continue // retry with the next backend
+			}
+			// Direct URL — no retry surface.
+			break
+		}
+		defer backendResp.Body.Close()
+
+		// Success — forward the response, dropping hop-by-hop headers.
+		conn.Write([]byte(fmt.Sprintf("%s %s\r\n", backendResp.Proto, backendResp.Status)))
+		for key, values := range backendResp.Header {
+			if _, hop := hopByHopHeaders[http.CanonicalHeaderKey(key)]; hop {
+				continue
+			}
+			for _, value := range values {
+				conn.Write([]byte(fmt.Sprintf("%s: %s\r\n", key, value)))
+			}
+		}
+		conn.Write([]byte("\r\n"))
+		io.Copy(conn, backendResp.Body)
+
+		return backendResp.StatusCode
+	}
+
+	log.Printf("All %d backend attempts failed (last err: %v)", maxAttempts, lastErr)
+	sendErrorResponse(conn, http.StatusBadGateway)
+	return http.StatusBadGateway
 }
 
 // isWebSocketUpgrade returns true when the request asks for an HTTP/1.1
