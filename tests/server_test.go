@@ -383,6 +383,173 @@ func TestLoadBalancingFailover(t *testing.T) {
 	}
 }
 
+func TestProxyRetryOnConnectionFailure(t *testing.T) {
+	var hits atomic.Int32
+	alive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		fmt.Fprint(w, "served-by-alive")
+	}))
+	defer alive.Close()
+
+	// A backend that's never reachable: bind a listener then close it. Its
+	// address is recorded but TCP dials will refuse.
+	deadLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadAddr := deadLn.Addr().String()
+	deadLn.Close()
+
+	au, _ := url.Parse(alive.URL)
+	upCfg := &config.UpstreamConfig{
+		Name:   "retrygroup",
+		Method: "round_robin",
+		Backends: []config.UpstreamBackend{
+			{Address: deadAddr, Weight: 1}, // refuses connection
+			{Address: au.Host, Weight: 1},  // alive
+		},
+		// No health check → backends start as Alive=true; retry must
+		// discover the dead one at request time.
+	}
+	up := upstream.New(upCfg)
+	upstreams := map[string]*upstream.Upstream{"retrygroup": up}
+
+	testPort := 8997
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{Path: "/", ProxyPass: "http://retrygroup"},
+		},
+	}
+	srv := server.New(cfg, upstreams)
+	go srv.Start()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	wispAddr := fmt.Sprintf("http://localhost:%d", testPort)
+
+	// First request: round-robin picks the dead backend first; retry should
+	// fall through to the alive one without surfacing a 502.
+	for i := 0; i < 4; i++ {
+		resp, err := http.Get(wispAddr + "/test")
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("request %d: expected 200, got %d", i, resp.StatusCode)
+		}
+		if !strings.Contains(string(body), "served-by-alive") {
+			t.Errorf("request %d: expected served-by-alive, got %q", i, string(body))
+		}
+	}
+
+	if hits.Load() != 4 {
+		t.Errorf("alive backend hits: expected 4, got %d", hits.Load())
+	}
+
+	// Dead backend should have been marked unhealthy after first failure.
+	if up.Backends[0].Alive.Load() {
+		t.Error("dead backend should be marked Alive=false after retry")
+	}
+}
+
+func TestProxyRetryReplaysRequestBody(t *testing.T) {
+	var receivedBody atomic.Value
+	alive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		receivedBody.Store(string(b))
+		fmt.Fprint(w, "ok")
+	}))
+	defer alive.Close()
+
+	deadLn, _ := net.Listen("tcp", "127.0.0.1:0")
+	deadAddr := deadLn.Addr().String()
+	deadLn.Close()
+
+	au, _ := url.Parse(alive.URL)
+	upCfg := &config.UpstreamConfig{
+		Name:   "bodyretry",
+		Method: "round_robin",
+		Backends: []config.UpstreamBackend{
+			{Address: deadAddr, Weight: 1},
+			{Address: au.Host, Weight: 1},
+		},
+	}
+	upstreams := map[string]*upstream.Upstream{"bodyretry": upstream.New(upCfg)}
+
+	testPort := 8998
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{Path: "/", ProxyPass: "http://bodyretry"},
+		},
+	}
+	srv := server.New(cfg, upstreams)
+	go srv.Start()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	payload := `{"id":42,"name":"wisp"}`
+	resp, err := http.Post(fmt.Sprintf("http://localhost:%d/echo", testPort), "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if got, _ := receivedBody.Load().(string); got != payload {
+		t.Errorf("body replay: expected %q, got %q", payload, got)
+	}
+}
+
+func TestProxyNoRetryOnBackend5xx(t *testing.T) {
+	var hits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "boom")
+	}))
+	defer backend.Close()
+
+	bu, _ := url.Parse(backend.URL)
+	upCfg := &config.UpstreamConfig{
+		Name:   "noretry",
+		Method: "round_robin",
+		Backends: []config.UpstreamBackend{
+			{Address: bu.Host, Weight: 1},
+			{Address: bu.Host, Weight: 1},
+		},
+	}
+	upstreams := map[string]*upstream.Upstream{"noretry": upstream.New(upCfg)}
+
+	testPort := 8999
+	cfg := &config.ServerConfig{
+		Listen: testPort,
+		Locations: []config.LocationConfig{
+			{Path: "/", ProxyPass: "http://noretry"},
+		},
+	}
+	srv := server.New(cfg, upstreams)
+	go srv.Start()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/", testPort))
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500 forwarded verbatim, got %d", resp.StatusCode)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("backend hits: expected 1 (no retry on 5xx), got %d", hits.Load())
+	}
+}
+
 // wsEchoBackend hijacks the connection, completes a 101 handshake, and
 // echoes any received bytes back to the client. The bytes do not have to
 // be valid WS frames — the proxy is protocol-agnostic after upgrade.
