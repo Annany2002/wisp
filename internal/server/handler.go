@@ -125,9 +125,11 @@ func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) in
 				"Transfer-Encoding: chunked\r\n"+
 				"Vary: Accept-Encoding\r\n"+
 				"Date: %s\r\n"+
+				"%s"+
 				"\r\n",
 			contentType,
 			time.Now().UTC().Format(time.RFC1123),
+			formatAddHeaders(loc),
 		)
 		conn.Write([]byte(responseHeaders))
 
@@ -142,10 +144,12 @@ func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) in
 				"Content-Type: %s\r\n"+
 				"Content-Length: %d\r\n"+
 				"Date: %s\r\n"+
+				"%s"+
 				"\r\n",
 			contentType,
 			fileSize,
 			time.Now().UTC().Format(time.RFC1123),
+			formatAddHeaders(loc),
 		)
 		conn.Write([]byte(responseHeaders))
 
@@ -155,6 +159,20 @@ func serveStaticFile(conn net.Conn, req *Request, loc *config.LocationConfig) in
 		}
 	}
 	return http.StatusOK
+}
+
+// formatAddHeaders renders a location's add_header directives as a series
+// of "Name: Value\r\n" lines suitable for embedding inside a response head.
+// Returns "" when there are none.
+func formatAddHeaders(loc *config.LocationConfig) string {
+	if loc == nil || len(loc.AddHeaders) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, h := range loc.AddHeaders {
+		fmt.Fprintf(&b, "%s: %s\r\n", h.Name, h.Value)
+	}
+	return b.String()
 }
 
 // resolveBackendURL resolves a proxy_pass value to an actual backend URL.
@@ -404,7 +422,8 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, 
 		}
 		defer backendResp.Body.Close()
 
-		// Success — forward the response, dropping hop-by-hop headers.
+		// Success — forward the response, dropping hop-by-hop headers and
+		// appending any location-level add_header values before the body.
 		conn.Write([]byte(fmt.Sprintf("%s %s\r\n", backendResp.Proto, backendResp.Status)))
 		for key, values := range backendResp.Header {
 			if _, hop := hopByHopHeaders[http.CanonicalHeaderKey(key)]; hop {
@@ -413,6 +432,9 @@ func serveReverseProxy(conn net.Conn, req *Request, loc *config.LocationConfig, 
 			for _, value := range values {
 				conn.Write([]byte(fmt.Sprintf("%s: %s\r\n", key, value)))
 			}
+		}
+		if extra := formatAddHeaders(loc); extra != "" {
+			conn.Write([]byte(extra))
 		}
 		conn.Write([]byte("\r\n"))
 		io.Copy(conn, backendResp.Body)
