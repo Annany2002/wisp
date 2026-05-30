@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Annany2002/wisp/internal/config"
@@ -26,9 +27,11 @@ const (
 
 // Server represents the Wisp server instance.
 type Server struct {
+	mu        sync.RWMutex
 	config    *config.ServerConfig
 	listener  net.Listener
 	upstreams map[string]*upstream.Upstream
+	tlsCert   *tls.Certificate
 }
 
 // Request holds parsed HTTP request data.
@@ -57,8 +60,18 @@ func (s *Server) Start() error {
 		if err != nil {
 			return fmt.Errorf("failed to load TLS key pair: %w", err)
 		}
+		s.tlsCert = &cert
 
-		tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+		tlsConfig := &tls.Config{
+			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				s.mu.RLock()
+				defer s.mu.RUnlock()
+				if s.tlsCert == nil {
+					return nil, fmt.Errorf("no certificate loaded")
+				}
+				return s.tlsCert, nil
+			},
+		}
 		s.listener, err = tls.Listen("tcp", address, tlsConfig)
 		if err != nil {
 			return fmt.Errorf("failed to start TLS listener on %s: %w", address, err)
@@ -89,6 +102,8 @@ func (s *Server) Start() error {
 
 // scheme returns "https" when TLS is configured, else "http".
 func (s *Server) scheme() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.config.SSLCertificate != "" && s.config.SSLCertificateKey != "" {
 		return "https"
 	}
@@ -102,6 +117,35 @@ func (s *Server) Shutdown() error {
 		return s.listener.Close()
 	}
 	return nil
+}
+
+// UpdateConfig dynamically updates the server configuration, upstream routing map,
+// and TLS certificate on the fly.
+func (s *Server) UpdateConfig(cfg *config.ServerConfig, upstreams map[string]*upstream.Upstream) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.config = cfg
+	s.upstreams = upstreams
+
+	if cfg.SSLCertificate != "" && cfg.SSLCertificateKey != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.SSLCertificate, cfg.SSLCertificateKey)
+		if err != nil {
+			return fmt.Errorf("failed to reload TLS key pair: %w", err)
+		}
+		s.tlsCert = &cert
+	} else {
+		s.tlsCert = nil
+	}
+
+	return nil
+}
+
+// HasSSL returns true if the server is configured with TLS certificates.
+func (s *Server) HasSSL() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.config.SSLCertificate != "" && s.config.SSLCertificateKey != ""
 }
 
 // handleConnection reads one or more HTTP requests from a persistent connection.
@@ -165,8 +209,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 		// Set write deadline for the response.
 		conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 
+		// Snapshot configuration, upstreams, and scheme under a read lock.
+		s.mu.RLock()
+		locationsSnapshot := s.config.Locations
+		upstreamsSnapshot := s.upstreams
+		s.mu.RUnlock()
+		schemeSnapshot := s.scheme()
+
 		// Route and dispatch.
-		location := s.routeRequest(&req)
+		location := s.routeRequest(&req, locationsSnapshot)
 		start := time.Now()
 		var statusCode int
 		hijacked := false
@@ -178,10 +229,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 		case location.Root != "":
 			statusCode = serveStaticFile(conn, &req, location)
 		case location.ProxyPass != "" && isWebSocketUpgrade(&req):
-			statusCode = serveWebSocketProxy(conn, reader, &req, location, s.upstreams, s.scheme())
+			statusCode = serveWebSocketProxy(conn, reader, &req, location, upstreamsSnapshot, schemeSnapshot)
 			hijacked = true
 		case location.ProxyPass != "":
-			statusCode = serveReverseProxy(conn, &req, location, s.upstreams, s.scheme())
+			statusCode = serveReverseProxy(conn, &req, location, upstreamsSnapshot, schemeSnapshot)
 		default:
 			statusCode = 500
 			sendErrorResponse(conn, statusCode)
@@ -210,14 +261,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 // routeRequest finds the best location configuration for a given request.
 // It uses a longest prefix matching algorithm.
-func (s *Server) routeRequest(req *Request) *config.LocationConfig {
+func (s *Server) routeRequest(req *Request, locations []config.LocationConfig) *config.LocationConfig {
 	var bestMatch *config.LocationConfig
 	longestMatchLen := 0
-	for i, location := range s.config.Locations {
-		if strings.HasPrefix(req.URI, location.Path) {
-			if len(location.Path) > longestMatchLen {
-				longestMatchLen = len(location.Path)
-				bestMatch = &s.config.Locations[i]
+	for i := range locations {
+		if strings.HasPrefix(req.URI, locations[i].Path) {
+			if len(locations[i].Path) > longestMatchLen {
+				longestMatchLen = len(locations[i].Path)
+				bestMatch = &locations[i]
 			}
 		}
 	}
