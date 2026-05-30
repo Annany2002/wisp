@@ -47,6 +47,25 @@ func New(cfg *config.UpstreamConfig) *Upstream {
 	return u
 }
 
+// NewWithState creates an Upstream from a parsed config, preserving the Alive and ActiveConns
+// state for any backend that was already present in the old Upstream.
+func NewWithState(cfg *config.UpstreamConfig, old *Upstream) *Upstream {
+	u := New(cfg)
+	if old == nil {
+		return u
+	}
+	for _, newBe := range u.Backends {
+		for _, oldBe := range old.Backends {
+			if newBe.Address == oldBe.Address {
+				newBe.Alive.Store(oldBe.Alive.Load())
+				newBe.ActiveConns.Store(oldBe.ActiveConns.Load())
+				break
+			}
+		}
+	}
+	return u
+}
+
 // Next returns the next available backend based on the configured method.
 // Returns an error if no healthy backends are available.
 func (u *Upstream) Next() (*Backend, error) {

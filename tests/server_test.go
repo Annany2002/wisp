@@ -841,3 +841,88 @@ func TestWebSocketProxyBackendDeclines(t *testing.T) {
 		t.Fatalf("expected 400 from declined upgrade, got %q", statusLine)
 	}
 }
+
+func TestConfigReload(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "wisp_test.conf")
+
+	dirA := filepath.Join(tempDir, "dirA")
+	dirB := filepath.Join(tempDir, "dirB")
+	os.Mkdir(dirA, 0755)
+	os.Mkdir(dirB, 0755)
+	os.WriteFile(filepath.Join(dirA, "index.html"), []byte("content A"), 0644)
+	os.WriteFile(filepath.Join(dirB, "index.html"), []byte("content B"), 0644)
+
+	// Port to use
+	testPort := 9091
+
+	// Initial config: serve dirA on port 9091
+	initialConfig := fmt.Sprintf(`
+server {
+    listen %d;
+    location / {
+        root %s;
+    }
+}
+`, testPort, dirA)
+	if err := os.WriteFile(configPath, []byte(initialConfig), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Create and start ServerManager
+	sm := server.NewServerManager(configPath)
+	if err := sm.LoadAndApplyConfig(false); err != nil {
+		t.Fatalf("failed to load initial config: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	wispAddr := fmt.Sprintf("http://localhost:%d", testPort)
+
+	// Request 1: should serve content A
+	resp1, err := http.Get(wispAddr + "/")
+	if err != nil {
+		t.Fatalf("GET 1 failed: %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+	if string(body1) != "content A" {
+		t.Errorf("expected 'content A', got %q", string(body1))
+	}
+
+	// Update config to serve dirB on port 9091 and add a custom header
+	newConfig := fmt.Sprintf(`
+server {
+    listen %d;
+    location / {
+        root %s;
+        add_header X-Reloaded yes;
+    }
+}
+`, testPort, dirB)
+	if err := os.WriteFile(configPath, []byte(newConfig), 0644); err != nil {
+		t.Fatalf("failed to write new config: %v", err)
+	}
+
+	// Trigger config reload
+	if err := sm.LoadAndApplyConfig(true); err != nil {
+		t.Fatalf("failed to reload config: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Request 2: should serve content B and include X-Reloaded header
+	resp2, err := http.Get(wispAddr + "/")
+	if err != nil {
+		t.Fatalf("GET 2 failed: %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if string(body2) != "content B" {
+		t.Errorf("expected 'content B', got %q", string(body2))
+	}
+	if got := resp2.Header.Get("X-Reloaded"); got != "yes" {
+		t.Errorf("expected X-Reloaded header to be 'yes', got %q", got)
+	}
+
+	// Shutdown the manager
+	sm.Shutdown()
+}
